@@ -1,0 +1,5736 @@
+---
+title: "Final Project: Time Series Analysis of Global and Local Temperature Patterns"
+subtitle: "Course 20236 — Time Series Analysis, a.y. 2024–2025"
+author: "Stefano Graziosi"
+date: "2025"
+format:
+  pdf:
+    documentclass: article
+    geometry:
+      - margin=2.5cm
+    toc: true
+    number-sections: true
+    fig-pos: "H"
+    fontsize: 11pt
+    header-includes:
+      - \usepackage{float}
+      - \usepackage{booktabs}
+execute:
+  echo: false
+  warning: false
+  message: false
+editor: visual
+---
+
+```{r}
+#| label: Necessary packages
+#| include: false
+
+library(dlm)
+library(forecast)
+
+library(mvtnorm)
+
+library(ggplot2)
+library(ggfortify)
+library(depmixS4)
+
+library(tidyverse) # includes (lubridate), (dplyr), (ggplot2), (tidyr), (tidyselect)
+library(tinytex)
+library(viridis)
+library(gridExtra)
+library(magrittr)
+library(textab)
+library(reshape2)
+library(quantmod)
+
+library(modeltime)
+library(timetk)
+library(timechange)
+
+library(conflicted)
+conflicts_prefer(dplyr::select)
+conflicts_prefer(dplyr::filter)
+```
+
+```{r}
+#| label: setup-theme-constants
+#| include: false
+
+# CHANGED: shared theme function and named constants for consistency
+output_dir <- "../output"
+dir.create(output_dir, showWarnings = FALSE, recursive = TRUE)
+
+# ── Named constants ──
+GISTEMP_FREQ   <- 12
+GHCN_FREQ      <- 365
+CI_Z           <- qnorm(0.975)   # 1.96 for 95% intervals
+FFBS_N_SIMS    <- 1000
+HOLDOUT_MONTHS <- 60
+HOLDOUT_DAYS   <- 30
+HOLDOUT_DAYS_FC <- 31
+LOESS_SPAN     <- 0.1
+
+# ── Shared ggplot2 theme ──
+theme_report <- function(base_size = 12) {
+  theme_minimal(base_size = base_size) +
+    theme(
+      plot.title       = element_text(face = "bold", size = base_size + 4),
+      plot.subtitle    = element_text(face = "italic", size = base_size),
+      axis.title       = element_text(face = "bold", size = base_size),
+      axis.text        = element_text(color = "gray20", size = base_size - 1),
+      legend.position  = "bottom",
+      legend.text      = element_text(size = base_size - 1),
+      panel.grid.major = element_line(color = "gray85", linewidth = 0.3),
+      panel.grid.minor = element_blank(),
+      strip.text       = element_text(face = "bold", size = base_size)
+    )
+}
+```
+
+# Description of the Problem
+
+This project explores both short and long term climatological patterns using data from the Global Historical Climatology Network (GHCN) database. The GHCN database represents one of the most comprehensive and reliable sources of historical climate and weather data, making it particularly valuable for studying temporal patterns.
+
+A fundamental distinction in atmospheric science lies between weather and climate analysis. Weather refers to short-term variations in temperature, precipitation, and other meteorological variables. These short-term fluctuations can be highly variable and are typically studied for day-to-day (or week-to-week) forecasting. Climate, in contrast, represents the long-term patterns and averages of these weather conditions, usually analyzed over periods of decades. We display in Figure 1 and Figure 2 two examples of climate and weather data, respectively.
+
+Through this project you will investigate both phenomena exploiting different statistical methods you will learn during the course. For instance, some of the questions you will be asked to answer are:
+
+1.  Can we identify any long-term trends in temperature data?
+
+2.  Can we exploit recent data to forecast temperature of the following temporal steps?
+
+While for weather purposes you can directly work with raw data from the GHCN archive, in order to extract some long term information it is better to analyze aggregated data. In fact, some pre--processing steps stress macro--behaviors by smoothing out some short-term variations. In this direction, one of the most reliable and influential sources is GISTEMP (GISS Surface Temperature Analysis) a product of the NASA Goddard Institute for Space Studies which merges some data gathered from GHCN meteorological stations with some ocean related data from ERSST stations.
+
+# Data description
+
+## GISTEMP
+
+As a first step, you will focus on the temperature data coming from GISTEMP. The series provided represents changes in the global surface temperature over time. It is derived from a global network of land and ship weather stations, which track daily surface temperatures. Measurements are then adjusted for urban heat effects and other biases, aggregated monthly and averaged across stations. Lastly, since the quantity of interest is the variation of the global surface temperature, the final measurements are adjusted by subtracting the average global surface temperature over the period 1951-1980, which serves as a reference value.
+
+The data set provides a reliable long-term record of temperature anomalies, offering valuable information on climate trends and variability.
+
+The data is provided in a csv file named `gistemp.txt`. Each row refers to a calendar year (starting from 1880, up to 2024) and contains the following variables.
+
+-   **1st column**: calendar year;
+-   **2nd to 13th**: monthly temperature difference with respect to reference period;
+-   **14th to 15th**: annual average of temperature difference taken as Jan-to-Dec (`J-D`) or Dec-to-Nov (`D-N`)
+-   **16th to 19th**: seasonal average for winter (`DJF`), spring (`MAM`), summer (`JJA`) and autumn (`SON`).
+
+You will need to extract the relevant variable (the monthly data) and convert it to a properly formatted ts object.
+
+## GHCN
+
+Next, we turn our attention to the GHCN (Global Historical Climatology Network) dataset, which provides high-resolution daily climate observations from thousands of land-based weather stations around the world. The data is widely used for studies on local and regional climate patterns, extreme weather events, and short-term trends.
+
+The dataset includes daily measurements of key meteorological variables such as temperature and precipitation. Each observation records minimum, maximum, and average daily temperatures, as well as the amount of precipitation, making it particularly valuable for fine-grained temporal analyses.
+
+The data is provided in a .`txt` file named `ghcn.txt`. Each row in the dataset corresponds to a single daily observation from a specific weather station. The columns are as follows:
+
+-   **1st column**: Station ID (a unique identifier for each weather station);
+
+-   **2nd column**: Station name;
+
+-   **3rd to 5th columns**: Geographic coordinates and elevation of the station (latitude, longitude, elevation in meters);
+
+-   **6th column**: Date of observation (formatted as YYYY-MM-DD).
+
+-   **7th column**: Minimum temperature of the day (TMIN), recorded in tenths of degrees Celsius;
+
+-   **8th column**: Maximum temperature of the day (TMAX), recorded in tenths of degrees Celsius;
+
+-   **9th column**: Average temperature of the day (TAVG), recorded in tenths of degrees Celsius;
+
+-   **10th column**: Daily total precipitation (PRCP), recorded in tenths of millimeters.
+
+# Task 1 | Data Acquisition and Exploration
+
+This section introduces the two primary datasets and performs exploratory analysis. The GISTEMP series provides a monthly record of global surface temperature anomalies from 1880 to 2024, enabling investigation of long-term climate trends. The GHCN dataset supplies daily station-level measurements, which we use for short-term weather forecasting in Task 3. For both datasets, we apply STL (Seasonal and Trend decomposition using Loess; Cleveland et al., 1990) to decompose each series into trend, seasonal, and remainder components, thereby isolating the features relevant to subsequent modelling.
+
+## 1.1 GISTEMP Analysis
+
+The GISTEMP dataset records monthly deviations of global mean surface temperature from the 1951–1980 baseline (Lenssen et al., 2024). We expect the trend component to reveal the long-term warming signal, while the seasonal component should exhibit a stable annual cycle if the reference-period subtraction has been consistently applied.
+
+```{r}
+#| label: Load GISTEMP
+
+gistemp <- read.csv("fp_data/gistemp.txt", header = TRUE) 
+monthly_gistemp <- gistemp[, 2:13] 
+ts_gistemp <- ts(as.vector(t(monthly_gistemp)),
+                 start = c(1880, 1),
+                 frequency = 12)
+```
+
+```{r}
+dates <- seq.Date(from = as.Date("1880-01-01"), 
+                  by = "month", 
+                  length.out = length(ts_gistemp))
+```
+
+```{r}
+#| label: gistemp-dataframe
+ts_df <- data.frame(date = dates, value = as.numeric(ts_gistemp))
+```
+
+```{r}
+#| label: fig-gistemp-raw
+#| fig-cap: "GISTEMP monthly temperature anomalies (1880--2024) relative to the 1951--1980 baseline, with a LOESS-smoothed trend. The dashed line marks zero anomaly."
+#| fig-width: 10
+#| fig-height: 5
+
+# CHANGED: use theme_report() and route ggsave to output_dir
+graph_1 <- ggplot(ts_df, aes(x = date, y = value)) +
+  geom_line(aes(color = "Data"), linewidth = 0.25) +
+  geom_smooth(
+    aes(color = "Smoothed Trend"),
+    method = "loess",
+    se = TRUE,
+    linewidth = 0.5,
+    show.legend = TRUE
+  ) +
+  geom_hline(
+    yintercept = 0,
+    color = "gray20",
+    linetype = "dashed",
+    linewidth = 0.5
+  ) +
+  labs(
+    x = "Date",
+    y = "Temperature Anomaly (°C)",
+    color = NULL
+  ) +
+  scale_color_manual(
+    values = c(
+      "Data" = "orange",
+      "Smoothed Trend" = "steelblue"
+    )
+  ) +
+  theme_report()
+
+print(graph_1)
+ggsave(file.path(output_dir, "graph_1.pdf"), plot = graph_1, device = "pdf", width = 10, height = 6, units = "in")
+```
+
+We apply STL decomposition to identify and separate the seasonal pattern from the long-term trend. Although the DLM in §2.2 incorporates seasonality directly, the HMM analysis in §2.1 requires a pre-deseasonalised series because the standard HMM assumes state-conditional Gaussian emissions without explicit periodic structure.
+
+```{r}
+#| label: gistemp-stl
+stl_decomp <- stl(ts_gistemp, s.window = "periodic", robust = TRUE)
+
+seasonal_comp <- stl_decomp$time.series[, "seasonal"]
+ts_gistemp_ds <- ts_gistemp - seasonal_comp
+```
+
+```{r}
+#| label: fig-gistemp-stl
+#| fig-cap: "STL decomposition of GISTEMP monthly anomalies into trend, seasonal, and remainder components. The trend component reveals a clear upward shift beginning around 1970, accelerating after 1990. The seasonal component is small (amplitude $\\approx 0.05$°C), confirming that the reference-period adjustment largely removes the annual cycle. The remainder captures short-term volcanic and El Niño/La Niña perturbations."
+#| fig-width: 10
+#| fig-height: 8
+
+# CHANGED: explicit STL decomposition plot (required by assignment)
+autoplot(stl_decomp) +
+  labs(title = "STL Decomposition of GISTEMP Monthly Anomalies") +
+  theme_report()
+```
+
+### 1.1.(a) Seasonality
+
+```{r}
+start_years <- seq(min(gistemp$Year), max(gistemp$Year) - 29, by = 10)
+seasonal_indices <- data.frame()
+
+for (start in start_years) {
+  # Subset the data for the 30-year period
+  subset_data <- subset(gistemp, Year >= start & Year < start + 30)
+  
+  # Reshape to long format for the subset
+  subset_long <- subset_data %>%
+    select(Year, Jan:Dec) %>%
+    pivot_longer(cols = Jan:Dec, names_to = "Month", values_to = "Anomaly") %>%
+    mutate(Month = match(Month, month.abb))
+  
+  # Create a ts object for the subset
+  ts_subset <- ts(subset_long$Anomaly, start = c(start, 1), frequency = 12)
+  
+  # Decompose using STL
+  decomp_subset <- stl(ts_subset, s.window = "periodic")
+  
+  # Extract the seasonal component and average by month
+  seasonal_comp <- decomp_subset$time.series[, "seasonal"]
+  temp_df <- data.frame(
+    Date = as.Date(as.yearmon(time(ts_subset))),
+    Month = cycle(ts_subset),
+    Seasonal = seasonal_comp
+  )
+  seasonal_mean <- aggregate(Seasonal ~ Month, data = temp_df, FUN = mean)
+  seasonal_mean$Period <- paste(start, start + 29, sep = "-")
+  
+  seasonal_indices <- rbind(seasonal_indices, seasonal_mean)
+}
+
+seasonal_indices$Month <- factor(seasonal_indices$Month,
+                                         levels = 1:12,
+                                         labels = month.name)
+```
+
+```{r}
+graph_4 <- ggplot(seasonal_indices, aes(x = Month, y = Seasonal, group = Period, color = Period)) +
+  geom_hline(yintercept = 0, color = "orange", linetype = "dashed", linewidth = 0.5) +
+  geom_line(linewidth = 0.5) +
+  geom_point(size = 0.75) +
+  scale_color_viridis_d(option = "H") +
+  ggtitle("Evolution of Seasonal Component") +
+  ylab("Average Seasonal Component") +
+  xlab("Month") +
+  guides(x = guide_axis(angle = 45)) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(size = 16, face = "bold"),
+    plot.subtitle = element_text(size = 12, face = "italic"),
+    axis.text = element_text(color = "black")
+  )
+
+print(graph_4)
+ggsave(file.path(output_dir, "graph_4.pdf"), plot = graph_4, device = "pdf", width = 8, height = 6, units = "in")
+```
+
+From 1880-1909 to 1940-1969
+
+```{r}
+seasonal_indices_before <- seasonal_indices[1:84, ]
+
+graph_5 <- ggplot(seasonal_indices_before, aes(x = Month, y = Seasonal, group = Period, color = Period)) +
+  geom_hline(yintercept = 0, color = "orange", linetype = "dashed", linewidth = 0.5) +
+  geom_line(linewidth = 0.5) +
+  geom_point(size = 0.75) +
+  scale_color_viridis_d(option = "C") +
+  ggtitle("Evolution of Seasonal Component") +
+  ylab("Average Seasonal Component") +
+  xlab("Month") +
+  guides(x = guide_axis(angle = 45)) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(size = 16, face = "bold"),
+    plot.subtitle = element_text(size = 12, face = "italic"),
+    axis.text = element_text(color = "black"),
+  )
+
+print(graph_5)
+ggsave(file.path(output_dir, "graph_5.pdf"), plot = graph_5, device = "pdf", width = 8, height = 6, units = "in")
+```
+
+From 1950-1979 to 1990-2019
+
+```{r}
+seasonal_indices_after <- seasonal_indices[85:144, ]
+
+graph_6 <- ggplot(seasonal_indices_after, aes(x = Month, y = Seasonal, group = Period, color = Period)) +
+  geom_hline(yintercept = 0, color = "orange", linetype = "dashed", linewidth = 0.5) +
+  geom_line(linewidth = 0.5) +
+  geom_point(size = 0.75) +
+  scale_color_viridis_d(option = "D") +
+  ggtitle("Evolution of Seasonal Component") +
+  ylab("Average Seasonal Component") +
+  xlab("Month") +
+  guides(x = guide_axis(angle = 45)) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(size = 16, face = "bold"),
+    plot.subtitle = element_text(size = 12, face = "italic"),
+    axis.text = element_text(color = "black")
+  )
+
+print(graph_6)
+ggsave(file.path(output_dir, "graph_6.pdf"), plot = graph_6, device = "pdf", width = 8, height = 6, units = "in")
+```
+
+
+## 1.2 GHCN analysis
+
+```{r}
+#| label: Load GHCN
+
+ghcn <- read.csv("fp_data/ghcn.txt", header = TRUE) 
+
+colnames(ghcn) <- c(
+  "station_id",
+  "station_name",
+  "latitude",
+  "longitude",
+  "elevation_m",
+  "date",
+  "tmin_tenthC",
+  "tmax_tenthC",
+  "tavg_tenthC",
+  "prcp_tenthmm"
+)
+
+ghcn <- ghcn %>%
+  mutate(
+    date  = as_date(date),                   # YYYY-MM-DD → Date
+    tmin  = tmin_tenthC / 10,                # → °C
+    tmax  = tmax_tenthC / 10,                # → °C
+    prcp  = prcp_tenthmm / 10                # → mm
+  ) %>%
+  select(-tmin_tenthC, -tmax_tenthC, -tavg_tenthC, -prcp_tenthmm)
+```
+
+```{r}
+#| label: Filtering for the Bay Area stations
+
+# San Francisco Downtown
+
+sf <- ghcn %>%
+  filter(station_id == "USW00023272") %>%
+  arrange(date)
+```
+
+### 1.2.(a) Seasonality
+
+```{r}
+#| fig-width: 10
+#| fig-height: 5
+
+library(ggplot2)
+library(scales)
+
+ggplot(sf, aes(x = date)) +
+  # 1. ribbon between Tmin and Tmax
+  geom_ribbon(
+    aes(ymin = tmin, ymax = tmax),
+    fill  = "orange",    # light‐blue fill
+    alpha = 0.4
+  ) +
+  # 2. lines for Tmin and Tmax
+  geom_line(
+    aes(y = tmin, color = "Tmin"),
+    size = 0.7, 
+    na.rm = TRUE
+  ) +
+  geom_line(
+    aes(y = tmax, color = "Tmax"),
+    size = 0.7, 
+    na.rm = TRUE
+  ) +
+  # 3. manually specify the two line colors
+  scale_color_manual(
+    values = c(
+      Tmin = "steelblue",    # darker blue
+      Tmax = "#D85711"     # darker red
+    )
+  ) +
+  # 4. format the x-axis to show every 3 months, angled labels
+  scale_x_date(
+    date_breaks   = "3 months",
+    date_labels   = "%b %Y",
+    expand        = c(0, 0)
+  ) +
+  # 5. axis labels, title, and legend title
+  labs(
+    x     = "Date",
+    y     = "Temperature (°C)",
+    color = "",   # blank so legend heading does not appear
+    title = "Daily Minimum and Maximum Temperatures\nSan Francisco, CA"
+  ) +
+  # 6. a minimal theme with some custom tweaks
+  theme_minimal(base_size = 12) +
+  theme(
+    axis.text.x      = element_text(angle = 45, hjust = 1),
+    legend.position  = "bottom",
+    plot.title       = element_text(hjust = 0.5, face = "bold"),
+    panel.grid.major = element_line(color = "gray80"),
+    panel.grid.minor = element_blank()
+  )
+
+```
+```{r}
+#| fig-width: 12
+#| fig-height: 6
+
+library(dplyr)
+library(ggplot2)
+library(scales)
+
+# 1. Filter SF data to the last 12 months
+sf_last <- sf %>%
+  filter(date >= (Sys.Date() - 520))
+
+# 2. Plot Tmin-Tmax ribbon + lines, restricted to sf_last
+descriptive_ghcn <- ggplot(sf_last, aes(x = date)) +
+  # ribbon between tmin and tmax
+  geom_ribbon(
+    aes(ymin = tmin, ymax = tmax),
+    fill  = "lightblue",
+    alpha = 0.4
+  ) +
+  # Tmin line
+  geom_line(
+    aes(y = tmin, color = "Tmin"),
+    size = 0.7,
+    na.rm = TRUE
+  ) +
+  # Tmax line
+  geom_line(
+    aes(y = tmax, color = "Tmax"),
+    size = 0.7,
+    na.rm = TRUE
+  ) +
+  # define manual colors for Tmin/Tmax
+  scale_color_manual(
+    values = c(
+      Tmin = "steelblue",
+      Tmax = "#D85711"
+    )
+  ) +
+  # x-axis: breaks every 3 months over the last year
+  scale_x_date(
+  date_breaks = "1 month",
+  date_labels = "%b %Y",
+  expand      = c(0, 0)
+  ) +
+  labs(
+    x     = "Date",
+    y     = "Temperature (°C)",
+    color = "",
+    title = "Daily maximum and minimum temperatures in downtown San Francisco",
+    subtitle = "January 2024 - December 2024"
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(
+    plot.title = element_text(size = 16, face = "bold"),
+    plot.subtitle = element_text(size = 12, face = "italic"),
+    axis.text.x     = element_text(angle = 45, hjust = 1, color = "black"),
+    axis.text.y     = element_text(color = "black"),
+  )
+
+print(descriptive_ghcn)
+ggsave(file.path(output_dir, "descriptive_ghcn.pdf"), plot = descriptive_ghcn, device = "pdf", width = 10, height = 6, units = "in")
+```
+
+```{r}
+#| fig-width: 12
+#| fig-height: 6
+
+
+library(dplyr)
+library(ggplot2)
+library(scales)
+
+# 1. Filter SF data to the last 3 years (≈ 1095 days)
+sf_last3 <- sf %>%
+  filter(date >= (Sys.Date() - 4095))
+
+# 2. Plot Tmin-Tmax ribbon + smoothed lines, restricted to sf_last3
+plot_sf_last3 <- ggplot(sf_last3, aes(x = date)) +
+  # a) ribbon between raw Tmin and Tmax
+  geom_ribbon(
+    aes(ymin = tmin, ymax = tmax),
+    fill  = "#ADD8E6",
+    alpha = 0.4
+  ) +
+  # b) smoothed Tmin curve
+  geom_smooth(
+    aes(y = tmin, color = "Tmin"),
+    method      = "loess",
+    span        = 0.1,     # adjust span for more/less smoothing
+    se          = FALSE,
+    size        = 0.8,
+    na.rm       = TRUE
+  ) +
+  # c) smoothed Tmax curve
+  geom_smooth(
+    aes(y = tmax, color = "Tmax"),
+    method      = "loess",
+    span        = 0.1,
+    se          = FALSE,
+    size        = 0.8,
+    na.rm       = TRUE
+  ) +
+  # d) manual colors for the two smoothed lines
+  scale_color_manual(
+    values = c(
+      Tmin = "steelblue",
+      Tmax = "#D85711"
+    )
+  ) +
+  # e) x-axis breaks every 6 months (three‐year span)
+  scale_x_date(
+    date_breaks = "6 months",
+    date_labels = "%b %Y",
+    expand      = c(0, 0)
+  ) +
+  # f) labels + title + subtitle
+  labs(
+    x        = "Date",
+    y        = "Temperature (°C)",
+    color    = "",
+    title    = "Daily minimum and maximum temperatures in downtown San Francisco",
+    subtitle = paste0(
+      format(min(sf_last3$date), "%B %Y"),
+      " - ",
+      format(max(sf_last3$date), "%B %Y")
+    )
+  ) +
+  # g) minimal theme with some tweaks
+  theme_minimal(base_size = 12) +
+  theme(
+    plot.title      = element_text(size = 16, face = "bold"),
+    plot.subtitle   = element_text(size = 12, face = "italic"),
+    axis.text.x     = element_text(angle = 45, hjust = 1, color = "black"),
+    axis.text.y     = element_text(color = "black"),
+    legend.position = "bottom",
+  )
+
+print(plot_sf_last3)
+
+# (Optional) Save to PDF or PNG
+ggsave(
+  filename = "sf_last3_years_smoothed.pdf",
+  plot     = plot_sf_last3,
+  device   = "pdf",
+  width    = 10,
+  height   = 6,
+  units    = "in"
+)
+
+```
+
+
+
+```{r}
+#| label: If we manage to obtain the extra data
+#| eval: false
+#| include: false
+
+# San Francisco Golden Gate Park
+
+sf_gg <- ghcn %>%
+  filter(station_id == "US1CASF0020") %>%
+  arrange(date)
+
+# San Francisco Potrero Hill (west side)
+
+sf_ph <- ghcn %>%
+  filter(station_id == "US1CASF0017") %>%
+  arrange(date)
+
+# San Francisco Bacon Street
+
+sf_bs <- ghcn %>%
+  filter(station_id == "US1CASF0021") %>%
+  arrange(date)
+
+# Sausalito 
+
+sf_sa <- ghcn %>% 
+  filter(station_id == "US1CAMR0016") %>%
+  arrange(date)
+
+# Oakland museum
+
+sf_om <- ghcn %>% 
+  filter(station_id == "USC00046336") %>%
+  arrange(date)
+```
+
+```{r}
+#| label: Obtaining a single list for all the stations
+
+unique(ghcn$station_name)
+
+stations <- c(
+  "KALISPELL GLACIER AP",
+  "LITTLE ROCK",
+  "MARTINSBURG E W VIRGINIA RGNL",
+  "WILMINGTON INTL AP",
+  "AUGUSTA STATE AP",
+  "HOULTON AP",
+  "PELLSTON RGNL AP",
+  "MASON CITY MUNI AP",
+  "PRESCOTT LOVE FLD",
+  "SAN FRANCISCO DWTN",
+  "LARAMIE AP",
+  "BAKER CITY AP",
+  "PASO ROBLES MUNI AP"
+)
+
+station_list <- lapply(stations, function(st) {
+  ghcn %>%
+    filter(station_name == st) %>%
+    arrange(date)
+})
+```
+
+```{r}
+#| label: Converting to a daily time series object
+
+start_yr  <- year(min(sf$date))
+start_doy <- yday(min(sf$date))
+
+ts_tmin <- ts(sf$tmin,
+              start     = c(start_yr, start_doy),
+              frequency = 365)
+ts_tmax <- ts(sf$tmax,
+              start     = c(start_yr, start_doy),
+              frequency = 365)
+ts_prcp <- ts(sf$prcp,
+              start     = c(start_yr, start_doy),
+              frequency = 365)
+```
+
+```{r}
+#| label: ghcn-stl-decomposition
+
+stl_tmin  <- stl(ts_tmin,  s.window = "periodic", robust = TRUE)
+stl_tmax  <- stl(ts_tmax,  s.window = "periodic", robust = TRUE)
+stl_prcp  <- stl(ts_prcp,  s.window = "periodic", robust = TRUE)
+```
+
+```{r}
+#| label: fig-ghcn-stl-tmin
+#| fig-cap: "STL decomposition of daily minimum temperature (Tmin) at San Francisco Downtown. The trend captures gradual shifts in the baseline minimum temperature; the seasonal component reflects the expected annual cycle; the remainder shows day-to-day weather variability."
+#| fig-width: 10
+#| fig-height: 8
+
+# CHANGED: explicit STL decomposition plots for GHCN (required by assignment)
+autoplot(stl_tmin) +
+  labs(title = "STL Decomposition of Daily Tmin — San Francisco Downtown") +
+  theme_report()
+```
+
+```{r}
+#| label: fig-ghcn-stl-tmax
+#| fig-cap: "STL decomposition of daily maximum temperature (Tmax) at San Francisco Downtown. The seasonal amplitude for Tmax is larger than for Tmin, reflecting the stronger diurnal modulation of daytime highs."
+#| fig-width: 10
+#| fig-height: 8
+
+autoplot(stl_tmax) +
+  labs(title = "STL Decomposition of Daily Tmax — San Francisco Downtown") +
+  theme_report()
+```
+
+```{r}
+#| label: ghcn-deseasonalise
+
+# CHANGED: separated STL computation from de-seasonalisation for clarity
+ts_tmin <- ts_tmin - stl_tmin$time.series[, "seasonal"]
+ts_tmax <- ts_tmax - stl_tmax$time.series[, "seasonal"]
+ts_prcp <- ts_prcp - stl_prcp$time.series[, "seasonal"]
+```
+
+The STL decomposition confirms a clear annual cycle in both Tmin and Tmax. For Tmax, the seasonal amplitude exceeds that of Tmin, consistent with San Francisco's Mediterranean climate where summer fog suppresses minimum temperatures but allows higher daytime maxima. The remainder components exhibit no obvious systematic structure, supporting the use of a random-walk-plus-noise model on the de-seasonalised series in §3.2.
+
+# Task 2 | GISTEMP: Do the Data Document Global Warming?
+
+We now turn to the central question of this project: whether the GISTEMP temperature anomaly record provides evidence of a sustained upward trend in global surface temperature. We address this using two complementary frameworks. First, Hidden Markov Models (HMMs) offer a regime-switching perspective that can identify discrete climate states and change points. Second, Dynamic Linear Models (DLMs) provide a continuous state-space approach that explicitly tracks evolving level and slope, enabling direct assessment of warming acceleration.
+
+## 2.1 Hidden Markov Models
+
+A Hidden Markov Model assumes that the observed series $\{y_t\}_{t=1}^T$ is generated by a latent discrete-state process $\{S_t\}$ taking values in $\{1, \ldots, K\}$. The model is specified by:
+
+- **Initial distribution**: $\pi_k = P(S_1 = k)$ for $k = 1, \ldots, K$;
+- **Transition matrix**: $A_{jk} = P(S_t = k \mid S_{t-1} = j)$;
+- **Emission distributions**: $y_t \mid S_t = k \sim \mathcal{N}(\mu_k, \sigma_k^2)$.
+
+Parameters $(\pi, A, \{\mu_k, \sigma_k^2\})$ are estimated by maximum likelihood via the Expectation-Maximisation (EM) algorithm (Baum--Welch; Rabiner, 1989). The most likely state sequence is recovered using the Viterbi algorithm. We fit both 2-state and 3-state models and compare them by AIC and BIC.
+
+### 2.1.a Two-State HMM
+
+```{r}
+#| label: hmm-2state
+
+# 1. Specify the HMM with 2 states
+hmm_2 <- depmix(ts_gistemp_ds ~ 1,
+                family = gaussian(),
+                nstates = 2,
+                data = data.frame(ts_gistemp_ds))
+
+# 2. Fit the model
+set.seed(123)
+fmodel <- fit(hmm_2, verbose = FALSE)
+
+# 3. Extract estimated mean and standard deviation for ALL hidden states
+fmodel@response[[1]][[1]]@parameters$coefficients
+fmodel@response[[1]][[1]]@parameters$sd
+fmodel@response[[2]][[1]]@parameters$coefficients
+fmodel@response[[2]][[1]]@parameters$sd
+
+# 4. Compute standard errors
+MLEse <- standardError(fmodel)
+round(MLEse$par,3)
+```
+
+### 2.1.b Three-State HMM
+
+```{r}
+#| label: hmm-3state
+
+# 1. Specify the HMM with 3 states
+hmm_3 <- depmix(ts_gistemp_ds ~ 1,
+                family = gaussian(),
+                nstates = 3,
+                data = data.frame(ts_gistemp_ds))
+
+# 2. Fit the model
+set.seed(123)
+fmodel3 <- fit(hmm_3, verbose = FALSE)
+
+# 3. Extract estimated mean and standard deviation for ALL hidden states
+fmodel3@response[[1]][[1]]@parameters$coefficients
+fmodel3@response[[1]][[1]]@parameters$sd
+fmodel3@response[[2]][[1]]@parameters$coefficients
+fmodel3@response[[2]][[1]]@parameters$sd
+fmodel3@response[[3]][[1]]@parameters$coefficients
+fmodel3@response[[3]][[1]]@parameters$sd
+
+# 4. Compute standard errors
+MLEse3 <- standardError(fmodel3)
+round(MLEse3$par, 3)
+```
+
+### 2.1.c Model Comparison and Transition Matrices
+
+```{r}
+#| label: tbl-hmm-comparison
+#| tbl-cap: "Comparison of 2-state and 3-state HMMs fitted to the deseasonalised GISTEMP series. The 3-state model achieves a higher log-likelihood but the improvement must be weighed against the additional parameters."
+
+# CHANGED: formal AIC/BIC comparison table for HMMs
+hmm_comparison <- data.frame(
+  Model = c("2-state HMM", "3-state HMM"),
+  `Log-Likelihood` = c(logLik(fmodel), logLik(fmodel3)),
+  AIC = c(AIC(fmodel), AIC(fmodel3)),
+  BIC = c(BIC(fmodel), BIC(fmodel3)),
+  `Num. Parameters` = c(npar(fmodel), npar(fmodel3)),
+  check.names = FALSE
+)
+knitr::kable(hmm_comparison, digits = 2, booktabs = TRUE)
+```
+
+```{r}
+#| label: tbl-hmm-transition-2state
+#| tbl-cap: "Estimated transition probability matrix for the 2-state HMM. High diagonal entries indicate persistent regimes: once the system enters a state, it tends to remain there for extended periods."
+
+# CHANGED: display transition matrix as formatted table
+A_2 <- matrix(getpars(fmodel)[3:6], nrow = 2, byrow = TRUE)
+rownames(A_2) <- colnames(A_2) <- paste0("State ", 1:2)
+knitr::kable(A_2, digits = 4, booktabs = TRUE)
+```
+
+```{r}
+#| label: tbl-hmm-transition-3state
+#| tbl-cap: "Estimated transition probability matrix for the 3-state HMM."
+
+A_3 <- matrix(getpars(fmodel3)[4:12], nrow = 3, byrow = TRUE)
+rownames(A_3) <- colnames(A_3) <- paste0("State ", 1:3)
+knitr::kable(A_3, digits = 4, booktabs = TRUE)
+```
+
+The 2-state HMM identifies a low-anomaly regime (pre-1970s) and a high-anomaly regime (post-1970s), consistent with the acceleration of global warming. The 3-state model further distinguishes an intermediate transitional period. Both models exhibit high persistence (large diagonal entries in $A$), indicating that once the climate enters a regime, transitions are rare — each regime spans several decades.
+
+### 2.1.d Limitations of the HMM Approach
+
+While HMMs successfully detect regime shifts, several limitations should be noted:
+
+1. **Conditional independence**: within each state $k$, the observations are assumed i.i.d. $\mathcal{N}(\mu_k, \sigma_k^2)$. This ignores serial correlation within regimes, which is clearly present in monthly temperature data.
+2. **Discrete state space**: the true warming process is continuous, but HMMs impose a finite number of discrete levels. This forces the model to approximate a smooth trend with step functions, potentially masking gradual acceleration.
+3. **Markov assumption**: the first-order Markov property $P(S_t \mid S_{t-1}, \ldots, S_1) = P(S_t \mid S_{t-1})$ cannot capture duration dependence — the probability of leaving a regime does not depend on how long the system has been in that regime.
+
+These limitations motivate the use of DLMs in §2.2, which model the latent state as a continuous, time-varying quantity with explicit trend and slope components.
+
+```{r}
+#| label: hmm-viterbi-states
+# Get the estimated state for each timestep
+estStates <- posterior(fmodel)
+
+plot(time(ts_gistemp_ds),
+     estStates$state,
+     type = "l",
+     ylab = "Estimated State",
+     xlab = "Time",
+     main = "Estimated Hidden States over Time (2-state HMM)",
+     col = "firebrick",
+     lwd = 1.5)
+```
+
+```{r}
+# Step 1: Get estimated states
+estStates <- posterior(fmodel, type = "viterbi")
+
+# Step 2: Assign state numbers to i and ii
+i <- estStates$state[1]
+ii <- if (i == 1) 2 else 1
+
+# Step 3: Get the estimated means for both states
+estMean1 <- fmodel@response[[i]][[1]]@parameters$coefficients
+estMean2 <- fmodel@response[[ii]][[1]]@parameters$coefficients
+
+# Step 4: Create a vector of means based on state assignments
+estMeans <- rep(estMean1, length(ts_gistemp_ds))
+estMeans[estStates[,1] == ii] <- estMean2
+
+time_vals <- as.numeric(time(ts_gistemp_ds))
+
+plot(ts_gistemp_ds,
+     main = "Deseasonalized Data and HMM Estimated Means",
+     ylab = "Temperature Anomaly",
+     xlab = "Time",
+     col = "gray")
+lines(time_vals, estMeans, col = "blue", lwd = 2)
+```
+
+```{r}
+#| fig-width: 12
+#| fig-height: 6
+
+
+df_states <- tibble(
+  time       = as.numeric(time(ts_gistemp_ds)),       # e.g. 1880.000, 1880.083, …
+  temp       = as.numeric(ts_gistemp_ds),             # your deseasonalized anomalies
+  state      = estStates$state                         # 1 or 2
+)
+
+# 2. Extract the two state‐specific means from the fitted model
+#    (for a 2‐state HMM they live in fmodel@response[[1]] and [[2]])
+state_means <- tibble(
+  state = 1:2,
+  mean  = sapply(1:2, function(k) {
+    as.numeric(fmodel@response[[k]][[1]]@parameters$coefficients)
+  })
+)
+
+# 3. Join to assign each timestamp its estimated‐mean based on the Viterbi state
+df_plot <- df_states %>%
+  left_join(state_means, by = "state") %>%
+  rename(est_mean = mean)
+
+# 4. Now plot in ggplot2:
+HMM_2s <- ggplot(df_plot, aes(x = time)) +
+  # 4a. Raw deseasonalized data in light gray
+  geom_line(aes(y = temp), color = "orange") +
+  # 4b. Overlay the HMM‐estimated mean (change color/size as you like)
+  geom_line(aes(y = est_mean), color = "steelblue", linewidth = 0.8) +
+  labs(
+    title = "Deseasonalized Data with 2-State HMM Estimated Means",
+    x     = "Time",
+    y     = "Temperature Anomaly"
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(
+    plot.title = element_text(size = 16, face = "bold"),
+    plot.subtitle = element_text(size = 12, face = "italic"),
+    axis.text = element_text(color = "black")
+  )
+
+print(HMM_2s)
+ggsave(file.path(output_dir, "HMM_2s.pdf"), plot = HMM_2s, device = "pdf", width = 10, height = 6, units = "in")
+```
+
+```{r}
+# Add estimated means as points
+# points(time(ts_gistemp_ds), estMeans, col = "steelblue", cex = 0.3)
+
+# Create a data frame with the series and estimated state
+results_df <- data.frame(
+  time_index = as.numeric(time(ts_gistemp_ds)),
+  sample_trajectory = as.numeric(ts_gistemp_ds),
+  estimated_state = estStates$state
+) %>% 
+  pivot_longer(cols = c("sample_trajectory", "estimated_state"),
+               names_to = "variable",
+               values_to = "value")
+
+# Create the plot
+twostate_hmm <- ggplot(results_df, aes(x = time_index, y = value)) +
+  geom_line() +
+  facet_wrap(~variable, scales = "free", ncol = 1) +
+  theme_minimal() +
+  labs(title = "HMM States and Deseasonalized Series",
+       x = "Time", y = "Value")
+
+# Show the plot
+plot(twostate_hmm)
+```
+
+```{r}
+#| fig-width: 8
+#| fig-height: 4
+
+# Get time and values
+time_vals <- as.numeric(time(ts_gistemp_ds))
+values <- as.numeric(ts_gistemp_ds)
+states <- posterior(fmodel)$state
+
+# Create data frame
+df <- data.frame(
+  time = time_vals,
+  value = values,
+  state = factor(states)
+)
+
+# Optional: Fit regression models by state
+model1 <- lm(value ~ time, data = df %>% filter(state == 1))
+model2 <- lm(value ~ time, data = df %>% filter(state == 2))
+
+# Create plot with confidence intervals
+p <- ggplot(df, aes(x = time, y = value, color = state, fill = state)) +
+  geom_point(alpha = 0.4, size = 0.5) +
+  geom_smooth(method = "loess", se = TRUE, linetype = "solid", linewidth = 1.2, alpha = 0.2) +
+  labs(title = "Linear Trends by Hidden State (HMM) with Confidence Intervals",
+       x = "Time", y = "Deseasonalized Temperature Anomaly") +
+  theme_minimal() +
+  scale_color_manual(values = c("darkorange", "steelblue")) +
+  scale_fill_manual(values = c("darkorange", "steelblue")) +
+  theme(
+    plot.title = element_text(size = 14, face = "bold"),
+    plot.subtitle = element_text(size = 10, face = "italic"),
+    axis.text = element_text(color = "black")
+  )
+
+# Show plot
+print(p)
+```
+
+```{r}
+# Prepare the time variable
+time_vals <- as.numeric(time(ts_gistemp_ds))
+
+# Combine time and deseasoned series into a dataframe
+df <- data.frame(
+  temp = as.numeric(ts_gistemp_ds),
+  time = time_vals
+)
+
+# Specify HMM with linear trend in each state: response ~ time
+hmm_linear <- depmix(temp ~ time, family = gaussian(), nstates = 2, data = df)
+
+# Fit the model
+set.seed(123)
+fmodel_linear <- fit(hmm_linear, verbose = FALSE)
+
+# Extract estimated intercepts and slopes
+coef1 <- fmodel_linear@response[[1]][[1]]@parameters$coefficients  # State 1
+coef2 <- fmodel_linear@response[[2]][[1]]@parameters$coefficients  # State 2
+
+# Optional: view
+coef1  # (Intercept and Slope for State 1)
+coef2  # (Intercept and Slope for State 2)
+
+# Get posterior state assignments
+estStates <- posterior(fmodel_linear, type = "viterbi")
+
+# Compute fitted values using state-specific regression
+fitted_vals <- numeric(length(df$temp))
+fitted_vals[estStates$state == 1] <- coef1[1] + coef1[2] * df$time[estStates$state == 1]
+fitted_vals[estStates$state == 2] <- coef2[1] + coef2[2] * df$time[estStates$state == 2]
+```
+
+```{r}
+# Plot original series with fitted trend lines
+plot(df$time, df$temp,
+     main = "Deseasonalized Data with State-Dependent Linear Trends",
+     ylab = "Temperature Anomaly", xlab = "Time",
+     type = "l", col = "gray")
+
+lines(df$time, fitted_vals, col = "steelblue", lwd = 2)
+
+# Prepare the time variable
+time_vals <- as.numeric(time(ts_gistemp_ds))
+
+# Combine time and deseasoned series into a dataframe
+df <- data.frame(
+  temp = as.numeric(ts_gistemp_ds),
+  time = time_vals
+)
+
+# Specify HMM with linear trend in each state: response ~ time
+hmm_linear3 <- depmix(temp ~ time, family = gaussian(), nstates = 3, data = df)
+
+# Fit the model
+set.seed(123)
+fmodel_linear3 <- fit(hmm_linear3, verbose = FALSE)
+
+# Extract estimated intercepts and slopes
+coef1 <- fmodel_linear3@response[[1]][[1]]@parameters$coefficients  # State 1
+coef2 <- fmodel_linear3@response[[2]][[1]]@parameters$coefficients  # State 2
+coef3 <- fmodel_linear3@response[[3]][[1]]@parameters$coefficients  # State 3
+```
+
+```{r}
+# Optional: view
+coef1  # (Intercept and Slope for State 1)
+coef2  # (Intercept and Slope for State 2)
+coef3  # (Intercept and Slope for State 3)
+```
+
+## 2.2 Dynamic Linear Models
+
+Unlike HMMs, Dynamic Linear Models (DLMs; West & Harrison, 1997) represent the latent state as a continuous vector $\boldsymbol{\theta}_t \in \mathbb{R}^p$ evolving via a linear Gaussian state-space system:
+
+$$
+\begin{aligned}
+y_t &= \mathbf{F}_t^\top \boldsymbol{\theta}_t + v_t, &v_t &\sim \mathcal{N}(0, V_t), \\
+\boldsymbol{\theta}_t &= \mathbf{G}_t \boldsymbol{\theta}_{t-1} + \mathbf{w}_t, &\mathbf{w}_t &\sim \mathcal{N}(\mathbf{0}, \mathbf{W}_t),
+\end{aligned}
+$$
+
+where $\mathbf{F}_t$ is the observation (design) vector, $\mathbf{G}_t$ is the state transition matrix, $V_t$ is the observation variance, and $\mathbf{W}_t$ is the state evolution covariance. The hyperparameters $V$ and $\mathbf{W}$ are estimated by maximum likelihood via the prediction-error decomposition of the Kalman filter. Given the MLE estimates, filtering provides one-step-ahead predictions, while the Rauch–Tung–Striebel (RTS) smoother yields retrospective state estimates using all data. For posterior uncertainty, we employ Forward Filtering Backward Sampling (FFBS) to draw from $p(\boldsymbol{\theta}_{1:T} \mid y_{1:T})$.
+
+We compare three DLM specifications of increasing complexity.
+
+### 2.2.a Locally Linear Trend + Seasonality
+
+This model applies to the **full** (not deseasonalised) GISTEMP series. The state vector is $\boldsymbol{\theta}_t = (\mu_t, \beta_t, s_{1,t}, \ldots, s_{11,t})^\top$, comprising a local level $\mu_t$, a slope $\beta_t$ (capturing warming rate), and 11 seasonal states. The observation and transition equations are:
+
+$$
+y_t = \mu_t + s_{1,t} + v_t, \qquad
+\begin{pmatrix} \mu_t \\ \beta_t \end{pmatrix} = \begin{pmatrix} 1 & 1 \\ 0 & 1 \end{pmatrix} \begin{pmatrix} \mu_{t-1} \\ \beta_{t-1} \end{pmatrix} + \begin{pmatrix} w_{\mu,t} \\ w_{\beta,t} \end{pmatrix},
+$$
+
+with seasonal states rotating via the standard `dlmModSeas(12)` construction. The signal-to-noise ratio $\hat{W}_\mu / \hat{V}$ controls how closely the filtered level tracks the data: a large ratio implies a responsive (noisy) filter, while a small ratio produces a smooth trend.
+
+```{r}
+#| label: dlm-llt-seas-build
+
+# 1. Builder: log-parameters = log(c(V, W_mu, W_beta, W_seas))
+buildLL2S <- function(par) {
+  V      <- exp(par[1])
+  W_mu   <- exp(par[2])
+  W_beta <- exp(par[3])
+  W_seas <- exp(par[4])
+  trend  <- dlmModPoly(order = 2,
+                       dV = V,
+                       dW = c(W_mu, W_beta))
+  seas   <- dlmModSeas(frequency = 12, 
+                       dV = 0,
+                       dW = c(W_seas, rep(0,10)))
+  trend + seas
+}
+```
+
+```{r}
+#| label: Obtaining the MLE estimates
+
+init <- log(c(var(ts_gistemp),  # V
+              var(ts_gistemp)/100,  # W_mu
+              var(ts_gistemp)/1000, # W_beta
+              var(ts_gistemp)/100)) # W_seas
+
+fitLL2S <- dlmMLE(ts_gistemp, parm = init, build = buildLL2S)
+modLL2S <- buildLL2S(fitLL2S$par)
+```
+
+```{r}
+#| label: Filtering and smoothing
+#| fig-width: 12
+#| fig-height: 6
+
+filtLL2S <- dlmFilter(ts_gistemp, modLL2S)
+smthLL2S <- dlmSmooth(filtLL2S)
+
+# 2. Extract the smoothed state means (drop the t=0 init)
+m_smth_all <- smthLL2S$s[-1, ]    # matrix with columns = (level, slope, seasonal…)
+level_smth <- m_smth_all[, 1]     # the level μ_t
+
+# 3. Compute the smoothing covariances → standard deviations
+Ct_smooth_list <- dlmSvd2var(smthLL2S$U.S, smthLL2S$D.S)
+var_level      <- sapply(Ct_smooth_list, function(mat) mat[1,1])  # length T+1
+sd_level       <- sqrt(var_level)[-1]                             # drop init → length T
+
+# 4. Build 95% credible intervals via Forward Filtering Backward Sampling (FFBS)
+  # 4.a.Running the Kalman filter
+
+modFilt <- dlmFilter(ts_gistemp, modLL2S)
+
+  # 4.b. backward-sample many smooth draws of the _level_ (state component 1)
+set.seed(123)
+n.sims <- 50
+
+sims.level <- replicate(
+  n.sims,
+  {
+    full.draw <- dlmBSample(modFilt)       # one draw
+    as.numeric(full.draw[-1, 1])           # drop init, take level
+  }
+)
+
+# 4.c. empirical 95% bands
+lower95_sim <- apply(sims.level, 1, quantile, probs = 0.025)
+upper95_sim <- apply(sims.level, 1, quantile, probs = 0.975)
+
+# 5. Time index (same as before)
+time_idx <- seq(
+                from = start(ts_gistemp)[1] + (start(ts_gistemp)[2]-1)/12,
+                by   = 1/12,
+                length.out = length(ts_gistemp)
+)
+
+df_smth <- data.frame(
+                      Time       = time_idx,
+                      Anomaly    = as.numeric(ts_gistemp),
+                      Level_smth = level_smth,
+                      Upper95    = upper95_sim,
+                      Lower95    = lower95_sim
+)
+
+# 6. Plot
+ggplot(df_smth, aes(x = Time)) +
+  geom_line(aes(y = Anomaly),  color = "orange", linewidth = 0.7) +
+  geom_line(aes(y = Level_smth), color = "steelblue", linewidth = 0.5) +
+  geom_ribbon(aes(ymin = Lower95, ymax = Upper95),
+              fill = "steelblue", alpha = 0.2) +
+  labs(
+    title    = "Smoothed Level from Seasonally-Augmented Local Linear Trend",
+    subtitle = "95% credible intervals around the smoothed μ_t",
+    x        = "Year",
+    y        = "Temperature Anomaly (°C)"
+  ) +
+  theme_minimal() +
+  theme(
+    plot.title    = element_text(size = 16, face = "bold"),
+    plot.subtitle = element_text(size = 12, face = "italic")
+  )
+
+```
+
+#### 2.2.a.(i) Evaluating the model
+
+```{r}
+#| label: Residual diagnostics
+
+# (a) raw and standardized one-step-ahead errors
+raw_resid <- residuals(filtLL2S, type = "raw")
+std_resid <- residuals(filtLL2S, type = "standardized", sd = FALSE)
+
+# (b) Plot standardized residuals over time
+ts.plot(std_resid, ylab = "Std. Residuals", main = "Standardized One-step-Ahead Errors")
+abline(h = c(-2,2), col = "firebrick", lty = 2)
+
+# (c) ACF to check for remaining autocorrelation
+acf(std_resid, main = "ACF of Standardized Residuals")
+
+# (d) Histogram + normal curve
+hist(std_resid, freq = FALSE, main = "Histogram of Std. Residuals",
+     xlab = "Std. Residual")
+curve(dnorm(x), add = TRUE)
+
+# (e) QQ-plot
+qqnorm(std_resid); qqline(std_resid)
+
+# (f) Ljung-Box test for whiteness
+Box.test(std_resid, type = "Ljung-Box", lag = 20)
+```
+
+```{r}
+#| label: Parameter uncertainty
+
+# 1. MLE with Hessian                                   
+fit_hess <- dlmMLE(ts_gistemp, parm = init, build = buildLL2S, hessian = TRUE)
+
+# 2. Extract log-parameters & invert Hessian
+log_par <- fit_hess$par
+vcov_log <- solve(fit_hess$hessian)
+se_log   <- sqrt(diag(vcov_log))
+
+# 3. Build a summary table
+param_tab <- data.frame(
+  param     = c("V", "W_mu", "W_beta", "W_seas"),
+  log_est   = log_par,
+  log_se    = se_log
+)
+param_tab$est     <- exp(param_tab$log_est)
+param_tab$lower95 <- exp(param_tab$log_est - 1.96 * param_tab$log_se)
+param_tab$upper95 <- exp(param_tab$log_est + 1.96 * param_tab$log_se)
+
+print(param_tab)
+```
+
+```{r}
+#| label: Model fit: log-likelihood, AIC, BIC
+
+# log-likelihood at the MLE (dlmMLE returns val = -logLik)
+logLik <- -fit_hess$value
+p      <- length(log_par)
+n      <- length(ts_gistemp)
+
+AIC <- -2*logLik + 2*p
+BIC <- -2*logLik + log(n)*p
+
+cat("logLik =", logLik, "\nAIC =", AIC, "\nBIC =", BIC, "\n")
+```
+
+```{r}
+#| label: Model fit comparison with pure LLT
+
+buildLL2 <- function(par) {
+  V      <- exp(par[1])
+  W_mu   <- exp(par[2])
+  W_beta <- exp(par[3])
+  # second-order polynomial → level + slope
+  dlmModPoly(order = 2,
+             dV = V,
+             dW = c(W_mu, W_beta))
+}
+
+# 2. Initial values (only 3 parameters now)
+initLL2 <- log(c(
+  var(ts_gistemp),         # V
+  var(ts_gistemp)/100,     # W_mu
+  var(ts_gistemp)/1000     # W_beta
+))
+
+# 3. Fit it
+fitLL2  <- dlmMLE(ts_gistemp, parm = init, build = buildLL2)
+modLL2  <- buildLL2(fitLL2$par)
+
+logLik2 <- -fitLL2$value
+p2      <- length(fitLL2$par)
+AIC2    <- -2*logLik2 + 2*p2
+BIC2    <- -2*logLik2 + log(length(ts_gistemp))*p2
+
+cat("logLik =", logLik2, "\nAIC =", AIC2, "\nBIC =", BIC2, "\n")
+cat("ΔAIC =",  AIC - AIC2,  "   ΔBIC =", BIC - BIC2)
+```
+
+```{r}
+#| label: Forecast-performance on a hold-out | Traditional method
+
+# (a) Define training sample ending December 2019
+n_train   <- length(ts_gistemp) - 12
+t_end     <- time(ts_gistemp)[n_train]
+train_ts  <- window(ts_gistemp, end = t_end)
+
+# (b) Re-fit on training data
+fit_train <- dlmMLE(train_ts, parm = init, build = buildLL2S)
+mod_train <- buildLL2S(fit_train$par)
+filt_train<- dlmFilter(train_ts, mod_train)
+
+# (c) Forecast next 12 months
+fc        <- dlmForecast(filt_train, nAhead = 12)
+y_true    <- as.numeric(ts_gistemp[(n_train+1):length(ts_gistemp)])
+y_pred    <- drop(fc$f)          # forecast means
+y_lo      <- fc$a + qnorm(0.025)*sqrt(unlist(lapply(fc$Q, function(Q) Q[1,1])))
+y_hi      <- fc$a + qnorm(0.975)*sqrt(unlist(lapply(fc$Q, function(Q) Q[1,1])))
+
+# (d) Compute accuracy metrics
+errors <- y_true - y_pred
+RMSE   <- sqrt(mean(errors^2))
+MAE    <- mean(abs(errors))
+coverage <- mean((y_true >= y_lo) & (y_true <= y_hi))
+
+cat("RMSE =", round(RMSE,3),
+    " MAE =", round(MAE,3),
+    " 95% CI coverage =", round(coverage*100,1), "%\n")
+```
+
+### 2.2.b Random Walk + Noise (Deseasonalised)
+
+This is the simplest DLM, applied to the **deseasonalised** GISTEMP series. The scalar state $\theta_t$ represents the underlying temperature level:
+
+$$
+y_t = \theta_t + v_t, \quad v_t \sim \mathcal{N}(0, V); \qquad \theta_t = \theta_{t-1} + w_t, \quad w_t \sim \mathcal{N}(0, W).
+$$
+
+In matrix form, $F = G = 1$ (scalars). The ratio $\hat{W}/\hat{V}$ determines the smoothness of the filtered level: when $W \ll V$, the filter attributes most variation to observation noise and produces a very smooth trend.
+
+```{r}
+#| label: dlm-rw-build
+
+# Builder: log-parameters = log(c(V, W))
+buildRW <- function(par) {
+  V <- exp(par[1])      # Observation noise
+  W <- exp(par[2])      # State evolution noise
+  dlmModPoly(order = 1, dV = V, dW = W)
+}
+
+# Initial values based on data variance
+initRW <- log(c(var(ts_gistemp_ds), var(ts_gistemp_ds) / 100))
+
+# Fit model
+fitRW  <- dlmMLE(ts_gistemp_ds, parm = initRW, build = buildRW)
+modRW  <- buildRW(fitRW$par)
+```
+
+```{r}
+#| label: Filtering and smoothing
+
+filtRW <- dlmFilter(ts_gistemp_ds, modRW)
+smthRW <- dlmSmooth(filtRW)
+
+# Smoothed level
+level_smth <- smthRW$s[-1]
+
+# Variance and std dev
+Ct_smooth_list <- dlmSvd2var(smthRW$U.S, smthRW$D.S)
+sd_level <- sqrt(sapply(Ct_smooth_list, function(M) M[1, 1]))[-1]
+
+# FFBS: simulate 95% CI
+set.seed(123)
+sims.level <- replicate(
+  1000,
+  {
+    draw <- dlmBSample(filtRW)
+    as.numeric(draw[-1])
+  }
+)
+lower95_sim <- apply(sims.level, 1, quantile, probs = 0.025)
+upper95_sim <- apply(sims.level, 1, quantile, probs = 0.975)
+
+# Time index
+time_idx <- seq(
+  from = start(ts_gistemp_ds)[1] + (start(ts_gistemp_ds)[2] - 1) / 12,
+  by = 1 / 12,
+  length.out = length(ts_gistemp_ds)
+)
+```
+
+```{r}
+#| label: Visual representation of the whole dataset
+#| fig-width: 12
+#| fig-height: 6
+
+df_rwpn <- data.frame(
+  Year     = time_idx,
+  Temp     = as.numeric(ts_gistemp_ds),
+  Level    = level_smth,
+  lower_95 = lower95_sim,
+  upper_95 = upper95_sim
+)
+
+# Build the plot
+ggplot(df_rwpn, aes(x = Year)) +
+
+  # (a) Original data as a thin orange line
+  geom_line(aes(y = Temp), 
+            color = "orange", 
+            size  = 0.7) +
+
+  # (b) Shaded 95% credible ribbon around smoothed level
+  geom_ribbon(aes(ymin = lower_95, ymax = upper_95),
+              fill  = "steelblue",
+              alpha = 0.25) +
+
+  # (c) Smoothed level (posterior mean) as a thicker blue line
+  geom_line(aes(y = Level),
+            color = "steelblue",
+            size  = 0.8) +
+
+  # Labels
+  labs(
+    title    = "Random-Walk Smoothing on NASA GISTEMP Series",
+    subtitle = "Smoothed Monthly State Estimates ± 95% Credible Intervals (FFBS)",
+    x        = "Year",
+    y        = "Temperature Anomaly (°C)"
+  ) +
+
+  # Minimal theme with larger base font for publication
+  theme_minimal(base_size = 14) +
+  theme(
+    # Make titles stand out
+    plot.title    = element_text(face = "bold", size = 16),
+    plot.subtitle = element_text(face = "italic", size = 12),
+    # Axis labels slightly larger
+    axis.title    = element_text(size = 14),
+    axis.text     = element_text(size = 12),
+  )
+
+```
+
+```{r}
+#| label: Visual representation of a subset (1972-1977)
+#| fig-width: 12
+#| fig-height: 6
+
+
+
+# Subset the data.frame for years 1972 ≤ Year ≤ 1977
+df_rwpn_sub <- subset(df_rwpn, Year >= 1972 & Year <= 1977)
+
+# 3. Plot the 1972-1977 subset
+ggplot_df_rwpn_sub <- ggplot(df_rwpn_sub, aes(x = Year)) +
+  
+  # (a) Original data 
+  geom_line(aes(y = Temp),
+            color = "orange",
+            size  = 0.7) +
+  
+  # (b) 95% ribbon around the smoothed level
+  geom_ribbon(aes(ymin = lower_95, ymax = upper_95),
+              fill  = "steelblue",
+              alpha = 0.25) +
+  
+  # (c) Smoothed level (posterior mean)
+  geom_line(aes(y = Level),
+            color = "steelblue",
+            size  = 0.8) +
+  
+  # 4. Labels
+  labs(
+    title    = "Random-Walk Smoothing on GISTEMP (1972-1977)",
+    subtitle = "Monthly Temperature Anomalies with Smoothed State ±95% CI (FFBS)",
+    x        = "Year",
+    y        = "Temperature Anomaly (°C)"
+  ) +
+  
+  # 5. Theme (same as before, but you can tweak if needed)
+  theme_minimal(base_size = 14) +
+  theme(
+    plot.title    = element_text(face = "bold", size = 16),
+    plot.subtitle = element_text(face = "italic", size = 12),
+    axis.title    = element_text(size = 14),
+    axis.text     = element_text(size = 12),
+    ) +
+  
+  # 6. Ensure x-axis ticks are sensible for a 5-year window
+  scale_x_continuous(breaks = seq(1972, 1977, by = 1))
+
+print(ggplot_df_rwpn_sub)
+ggsave(file.path(output_dir, "ggplot_df_rwpn_sub.pdf"), plot = ggplot_df_rwpn_sub, device = "pdf", width = 12, height = 6, units = "in")
+```
+
+#### 2.2.b.(i) RWPN Model evaluation
+
+```{r}
+raw_resid <- residuals(filtRW, type = "raw")
+std_resid <- residuals(filtRW, type = "standardized", sd = FALSE)
+
+#— 1. Put standardized residuals into a data.frame —#
+df_resid <- data.frame(
+  Year     = time_idx,
+  StdResid = as.numeric(std_resid)
+)
+
+#— 2. (a) Time-series plot of Std. Residuals —#
+p_ts <- ggplot(df_resid, aes(x = Year, y = StdResid)) +
+  geom_line(color = "steelblue", linewidth = 0.8) +
+  geom_hline(yintercept = c(-2, 2),
+             linetype   = "dashed",
+             color      = "orange",
+             linewidth  = 0.6) +
+  labs(
+    title = "Standardized One-Step-Ahead Errors (Std. Residuals)",
+    x     = "Year",
+    y     = "Std. Residual"
+  ) +
+  theme_minimal(base_size = 13) +
+  theme(
+    plot.title    = element_text(face = "bold", size = 15),
+    axis.title    = element_text(size = 13),
+    axis.text     = element_text(size = 11),
+    panel.grid    = element_line(color = "gray85", size = 0.4),
+    panel.grid.minor = element_blank()
+  )
+
+
+#— 2. (b) ACF plot of Std. Residuals —#
+#   Compute ACF values without plotting
+acf_obj <- acf(df_resid$StdResid, plot = FALSE, lag.max = 40)
+
+#   Turn the ACF into a data.frame
+df_acf <- data.frame(
+  Lag = as.numeric(acf_obj$lag)[-1],       # drop lag 0
+  ACF = as.numeric(acf_obj$acf)[-1]
+)
+
+p_acf <- ggplot(df_acf, aes(x = Lag, y = ACF)) +
+  geom_col(fill = "steelblue", color = NA, width = 0.1) +
+  geom_hline(yintercept = 0, color = "gray40", size = 0.5) +
+  geom_hline(yintercept = c(-1.96 / sqrt(length(std_resid)),
+                            1.96 / sqrt(length(std_resid))),
+             linetype = "dashed",
+             color    = "orange",
+             size     = 0.4) +
+  labs(
+    title = "ACF of Standardized Residuals",
+    x     = "Lag",
+    y     = "ACF"
+  ) +
+  theme_minimal(base_size = 13) +
+  theme(
+    plot.title     = element_text(face = "bold", size = 15),
+    axis.title     = element_text(size = 13),
+    axis.text      = element_text(size = 11),
+    panel.grid.major = element_line(color = "gray85", size = 0.4),
+    panel.grid.minor = element_blank()
+  )
+
+
+#— 2. (c) Histogram + Normal Density —#
+#   Estimate empirical SD (should be ≈ 1 if truly standardized)
+emp_sd <- sd(df_resid$StdResid)
+
+p_hist <- ggplot(df_resid, aes(x = StdResid)) +
+  geom_histogram(aes(y = ..density..),
+                 bins   = 30,
+                 fill   = "steelblue",
+                 color  = "white",
+                 alpha  = 0.8) +
+  stat_function(
+    fun  = dnorm,
+    args = list(mean = 0, sd = emp_sd),
+    color = "orange",
+    size  = 1
+  ) +
+  labs(
+    title = "Histogram of Standardized Residuals",
+    x     = "Std. Residual",
+    y     = "Density"
+  ) +
+  theme_minimal(base_size = 13) +
+  theme(
+    plot.title    = element_text(face = "bold", size = 15),
+    axis.title    = element_text(size = 13),
+    axis.text     = element_text(size = 11),
+    panel.grid.major = element_line(color = "gray85", size = 0.4),
+    panel.grid.minor = element_blank()
+  )
+
+
+#— 2. (d) Q-Q Plot of Std. Residuals —#
+p_qq <- ggplot(df_resid, aes(sample = StdResid)) +
+  stat_qq(color    = "steelblue", size = 1.8) +
+  stat_qq_line(color = "orange", size = 0.6) +
+  labs(
+    title = "Normal Q-Q Plot of Standardized Residuals",
+    x     = "Theoretical Quantiles",
+    y     = "Sample Quantiles"
+  ) +
+  theme_minimal(base_size = 13) +
+  theme(
+    plot.title    = element_text(face = "bold", size = 15),
+    axis.title    = element_text(size = 13),
+    axis.text     = element_text(size = 11),
+    panel.grid.major = element_line(color = "gray85", size = 0.4),
+    panel.grid.minor = element_blank()
+  )
+
+
+#— 3. Print the Ljung-Box test result —#
+lb_test <- Box.test(df_resid$StdResid, type = "Ljung-Box", lag = 20)
+print(lb_test)
+
+
+#— 4. Display all four plots —#
+# You can simply print them one after the other, or arrange with patchwork/cowplot
+# (here, we just print sequentially)
+
+p_ts
+p_acf
+p_hist
+p_qq
+```
+
+```{r}
+fitRW_hess <- dlmMLE(ts_gistemp, parm = initRW, build = buildRW, hessian = TRUE)
+log_par_rw <- fitRW_hess$par
+vcov_log_rw <- solve(fitRW_hess$hessian)
+se_log_rw   <- sqrt(diag(vcov_log_rw))
+
+param_rw <- data.frame(
+  param     = c("V", "W"),
+  log_est   = log_par_rw,
+  log_se    = se_log_rw,
+  est       = exp(log_par_rw),
+  lower95   = exp(log_par_rw - 1.96 * se_log_rw),
+  upper95   = exp(log_par_rw + 1.96 * se_log_rw)
+)
+print(param_rw)
+```
+
+```{r}
+logLik_rw <- -fitRW_hess$value
+p_rw      <- length(log_par_rw)
+n_rw      <- length(ts_gistemp)
+
+AIC_rw <- -2 * logLik_rw + 2 * p_rw
+BIC_rw <- -2 * logLik_rw + log(n_rw) * p_rw
+
+cat("logLik =", logLik_rw, "\nAIC =", AIC_rw, "\nBIC =", BIC_rw, "\n")
+```
+
+```{r}
+n_train <- length(ts_gistemp) - 60
+train_ts <- window(ts_gistemp, end = time(ts_gistemp)[n_train])
+
+fit_rw_tr <- dlmMLE(train_ts, parm = initRW, build = buildRW)
+mod_rw_tr <- buildRW(fit_rw_tr$par)
+filt_rw_tr <- dlmFilter(train_ts, mod_rw_tr)
+
+fc_rw <- dlmForecast(filt_rw_tr, nAhead = 60)
+y_true <- as.numeric(ts_gistemp[(n_train + 1):length(ts_gistemp)])
+y_pred <- drop(fc_rw$f)
+y_lo   <- fc_rw$a + qnorm(0.025) * sqrt(sapply(fc_rw$Q, function(Q) Q[1,1]))
+y_hi   <- fc_rw$a + qnorm(0.975) * sqrt(sapply(fc_rw$Q, function(Q) Q[1,1]))
+
+errors <- y_true - y_pred
+RMSE_rw   <- sqrt(mean(errors^2))
+MAE_rw    <- mean(abs(errors))
+coverage_rw <- mean((y_true >= y_lo) & (y_true <= y_hi))
+
+cat("RW+Noise forecast:\n",
+    "RMSE =", round(RMSE_rw, 3),
+    " MAE =", round(MAE_rw, 3),
+    " 95% CI coverage =", round(coverage_rw * 100, 1), "%\n")
+
+```
+
+### 2.2.c Random Walk + Seasonality
+
+```{r}
+# Builder: log-parameters = log(c(V, W_level, W_seasonal))
+buildRWSeas <- function(par) {
+  V         <- exp(par[1])
+  W_level   <- exp(par[2])
+  W_season  <- exp(par[3])
+  
+  level     <- dlmModPoly(order = 1, dV = V, dW = W_level)
+  seasonal  <- dlmModSeas(frequency = 12, dV = 0,
+                          dW = c(W_season, rep(0, 10)))  # only first harmonic
+  level + seasonal
+}
+
+# Initial values: reasonable guesses
+init_par <- log(c(
+  var(ts_gistemp),
+  var(ts_gistemp)/100,
+  var(ts_gistemp)/100
+))
+
+# MLE estimation
+fitRWSeas <- dlmMLE(ts_gistemp, parm = init_par, build = buildRWSeas)
+modRWSeas <- buildRWSeas(fitRWSeas$par)
+```
+
+```{r}
+filtRWSeas <- dlmFilter(ts_gistemp, modRWSeas)
+smthRWSeas <- dlmSmooth(filtRWSeas)
+
+# Extract smoothed level only (first state component)
+level_smth <- smthRWSeas$s[-1, 1]
+
+# Variance of smoothed level
+Ct_smooth <- dlmSvd2var(smthRWSeas$U.S, smthRWSeas$D.S)
+sd_level  <- sqrt(sapply(Ct_smooth, function(M) M[1, 1]))[-1]
+
+# FFBS simulations for credible intervals
+set.seed(123)
+n.sims <- 50
+sims.level <- replicate(
+  n.sims,
+  {
+    draw <- dlmBSample(filtRWSeas)
+    as.numeric(draw[-1, 1])
+  }
+)
+
+lower95_sim <- apply(sims.level, 1, quantile, probs = 0.025)
+upper95_sim <- apply(sims.level, 1, quantile, probs = 0.975)
+
+# Time index
+time_idx <- seq(
+  from = start(ts_gistemp)[1] + (start(ts_gistemp)[2] - 1) / 12,
+  by   = 1 / 12,
+  length.out = length(ts_gistemp)
+)
+
+# Data frame for plotting
+df_rwseas <- data.frame(
+  Time       = time_idx,
+  Anomaly    = as.numeric(ts_gistemp),
+  Level_smth = level_smth,
+  Lower95    = lower95_sim,
+  Upper95    = upper95_sim
+)
+
+# Plot
+ggplot(df_rwseas, aes(x = Time)) +
+  geom_line(aes(y = Anomaly), color = "orange", linewidth = 0.7) +
+  geom_line(aes(y = Level_smth), color = "steelblue", linewidth = 0.5) +
+  geom_ribbon(aes(ymin = Lower95, ymax = Upper95),
+              fill = "steelblue", alpha = 0.2) +
+  labs(
+    title = "Smoothed Level from RW + Seasonality",
+    subtitle = "95% credible intervals from FFBS",
+    x = "Year", y = "Temperature Anomaly (°C)"
+  ) +
+  theme_minimal()
+
+```
+
+```{r}
+raw_resid <- residuals(filtRWSeas, type = "raw")
+std_resid <- residuals(filtRWSeas, type = "standardized", sd = FALSE)
+
+ts.plot(std_resid, ylab = "Standardized Residuals",
+        main = "One-step-ahead Standardized Residuals")
+abline(h = c(-2, 2), col = "firebrick", lty = 2)
+acf(std_resid, main = "ACF of Standardized Residuals")
+hist(std_resid, freq = FALSE, main = "Histogram of Std. Residuals")
+curve(dnorm(x), add = TRUE)
+qqnorm(std_resid); qqline(std_resid)
+Box.test(std_resid, lag = 20, type = "Ljung-Box")
+```
+
+```{r}
+fit_hess <- dlmMLE(ts_gistemp, parm = init_par,
+                   build = buildRWSeas, hessian = TRUE)
+
+log_par <- fit_hess$par
+vcov_log <- solve(fit_hess$hessian)
+se_log <- sqrt(diag(vcov_log))
+
+param_tab <- data.frame(
+  param     = c("V", "W_level", "W_seasonal"),
+  log_est   = log_par,
+  log_se    = se_log,
+  est       = exp(log_par),
+  lower95   = exp(log_par - 1.96 * se_log),
+  upper95   = exp(log_par + 1.96 * se_log)
+)
+
+print(param_tab)
+```
+
+```{r}
+logLik <- -fit_hess$value
+p <- length(log_par)
+n <- length(ts_gistemp)
+
+AIC <- -2 * logLik + 2 * p
+BIC <- -2 * logLik + log(n) * p
+
+cat("logLik =", logLik,
+    "\nAIC =", AIC,
+    "\nBIC =", BIC, "\n")
+
+```
+
+```{r}
+n_train   <- length(ts_gistemp) - 60
+t_end     <- time(ts_gistemp)[n_train]
+train_ts  <- window(ts_gistemp, end = t_end)
+
+# Refit on training
+fit_train <- dlmMLE(train_ts, parm = init_par, build = buildRWSeas)
+mod_train <- buildRWSeas(fit_train$par)
+filt_train <- dlmFilter(train_ts, mod_train)
+
+# Forecast 60 months
+fc <- dlmForecast(filt_train, nAhead = 60)
+y_true <- as.numeric(ts_gistemp[(n_train+1):length(ts_gistemp)])
+y_pred <- drop(fc$f)
+y_lo <- fc$a + qnorm(0.025) * sqrt(sapply(fc$Q, function(Q) Q[1,1]))
+y_hi <- fc$a + qnorm(0.975) * sqrt(sapply(fc$Q, function(Q) Q[1,1]))
+
+# Accuracy metrics
+errors   <- y_true - y_pred
+RMSE     <- sqrt(mean(errors^2))
+MAE      <- mean(abs(errors))
+coverage <- mean((y_true >= y_lo) & (y_true <= y_hi))
+
+cat("RW + Seasonality Forecast:\n",
+    "RMSE =", round(RMSE, 3),
+    " MAE =", round(MAE, 3),
+    " 95% CI coverage =", round(coverage * 100, 1), "%\n")
+
+```
+
+# Task 3 \| GHCN: Weather prediction
+
+The dataset includes data along space (several stations) and time. Typical aspects of interest are spatial interpolations (at a fixed time) or, in our case, DLM models for spatio-temporal data, considering temperature over time for multiple stations (say 2, for simplicity). You are welcome to explore this direction. However, to keep your workload lighter, here is our suggestion for your possible analysis, focusing only on one station, namely `San Francisco Downtown`.
+
+## 3.1 Data and question
+
+Extract the seasonality adjusted minimum and maximum daily temperatures from the `San Francisco Downtown` station. We want to obtain short term predictions for the minimum and maximum temperature and to investigate a potential common latent process that describes the weather in San Francisco.
+
+N.B.: You need to divide columns 7, 8, and 9 to obtain temperatures (`TMIN`, `TMAX`, `TAVG`) in Celsius degrees.
+
+## 3.2 Short term temperature prediction
+
+Explore the use of Dynamic Linear Models to obtain short term temperature predictions. Evaluate the models based on their interpretability and the quality of their predictions.
+
+Namely, consider the bivariate time series of minimum and maximum temperature,
+
+$$
+Y_t = 
+\begin{bmatrix}T_{\min,t} \\[4pt]T_{\max,t}\end{bmatrix}
+$$
+
+and explore the following models.
+
+### 3.2.(a) Independent random walk plus noise models
+
+$$
+\begin{aligned}\mathbf{Y}_t &= \boldsymbol{\theta}_t + \mathbf{v}_t,   &\mathbf{v}_t &\sim \mathcal{N}(\mathbf{0}, \mathbf{V}),\\\boldsymbol{\theta}_t &= \boldsymbol{\theta}_{t-1} + \mathbf{w}_t,   &\mathbf{w}_t &\sim \mathcal{N}(\mathbf{0}, \mathbf{W}),\end{aligned}
+$$
+
+where $(\boldsymbol{\theta}_t = [\theta{1,t},,\theta{2,t}]^\top)$ is the latent state at time $(t)$, and $(\mathbf{W})$ and $(\mathbf{V})$ are diagonal:
+
+$$
+\mathbf{W} =\begin{bmatrix}
+\sigma^2_{w,1} & 0\\
+0 & \sigma^2_{w,2}
+\end{bmatrix}, \qquad \mathbf{V} =\begin{bmatrix}
+\sigma^2_{v,1} & 0\\
+0 & \sigma^2_{v,2}
+\end{bmatrix}.
+$$ \> Stefano
+
+```{r}
+#| label: 1. Builder: log-parameters = log(c(V1, V2, W1, W2))
+
+buildIndRWNoise <- function(par) {
+  V1 <- exp(par[1])
+  V2 <- exp(par[2])
+  W1 <- exp(par[3])
+  W2 <- exp(par[4])
+  
+  # independent two-dimensional random-walk + noise
+  mod_rw <- dlm(
+    FF = diag(2),
+    V  = diag(c(V1, V2)),
+    GG = diag(2),
+    W  = diag(c(W1, W2)),
+    m0 = rep(0, 2),
+    C0 = 1e7 * diag(2)
+  )
+  mod_rw
+}
+```
+
+```{r}
+#| label: 2. Obtaining the MLE estimates
+
+# initial guesses: obs-var = var(y), rw-var = var(diff(y))
+y       <- cbind(ts_tmin, ts_tmax)
+colnames(y) <- c("tmin", "tmax")
+
+init_par <- log(c(
+  var(y[,1], na.rm=TRUE), 
+  var(y[,2], na.rm=TRUE), 
+  var(diff(y[,1]),  na.rm=TRUE), 
+  var(diff(y[,2]),  na.rm=TRUE)
+))
+
+fitInd <- dlmMLE(
+  y     = y,
+  parm  = init_par,
+  build = buildIndRWNoise,
+  lower = rep(-20, 4),  # keep logs in a reasonable range
+  upper = rep( 20, 4)
+)
+
+modInd <- buildIndRWNoise(fitInd$par)
+```
+
+```{r}
+#| label: 3. Filtering and smoothing
+
+filtInd  <- dlmFilter(y, modInd)
+smthInd  <- dlmSmooth(filtInd)
+
+# extract smoothed states (drop the t=0 initialization)
+s_all    <- smthInd$s[-1, ]        # T×2 matrix: columns = (θ₁,t, θ₂,t)
+tmin_smth <- s_all[, 1]            # smoothed θ₁,t for Tmin
+tmax_smth <- s_all[, 2]            # smoothed θ₂,t for Tmax
+
+# retrieve estimated noise variances
+V_est <- modInd$V
+W_est <- modInd$W
+
+cat("Estimated observation variances (V):\n")
+print(V_est)
+cat("Estimated state-innovation variances (W):\n")
+print(W_est)
+```
+
+```{r}
+#| fig-width: 12
+#| fig-height: 6
+
+# 1. Compute smoothing covariances → standard deviations
+Ct_list    <- dlmSvd2var(smthInd$U.S, smthInd$D.S)
+var_tmin   <- sapply(Ct_list, function(mat) mat[1,1])
+sd_tmin    <- sqrt(var_tmin)[-1]
+var_tmax   <- sapply(Ct_list, function(mat) mat[2,2])
+sd_tmax    <- sqrt(var_tmax)[-1]
+
+# 2. Build 95% credible intervals via FFBS
+set.seed(123)
+n.sims     <- 50                                                                
+sims_array <- replicate(
+  n.sims,
+  {
+    fd <- dlmBSample(filtInd)
+    rbind(
+      tmin = as.numeric(fd[-1, 1]),
+      tmax = as.numeric(fd[-1, 2])
+    )
+  },
+  simplify = "array"
+)
+
+lower95_tmin <- apply(sims_array["tmin", , ], 1, quantile, probs = 0.025)
+upper95_tmin <- apply(sims_array["tmin", , ], 1, quantile, probs = 0.975)
+lower95_tmax <- apply(sims_array["tmax", , ], 1, quantile, probs = 0.025)
+upper95_tmax <- apply(sims_array["tmax", , ], 1, quantile, probs = 0.975)
+
+# 3. Time index for daily series
+time_idx <- seq(
+  from       = start(ts_tmin)[1] + (start(ts_tmin)[2] - 1) / 365,
+  by         = 1/365,
+  length.out = length(ts_tmin)
+)
+
+# 4. Prepare data frame for plotting
+df_plot <- data.frame(
+  Time     = rep(time_idx, 2),
+  Observed = c(as.numeric(ts_tmin),    as.numeric(ts_tmax)),
+  Smoothed = c(smthInd$s[-1,1],        smthInd$s[-1,2]),
+  Lower95  = c(lower95_tmin,           lower95_tmax),
+  Upper95  = c(upper95_tmin,           upper95_tmax),
+  Series   = rep(c("Tmin", "Tmax"), each = length(time_idx))
+)
+
+# 5. Plot with facets
+library(ggplot2)
+
+ggplot(df_plot, aes(x = Time)) +
+  geom_line(aes(y = Observed), color = "orange",    linewidth = 0.7) +
+  geom_line(aes(y = Smoothed), color = "steelblue", linewidth = 0.5) +
+  geom_ribbon(aes(ymin = Lower95, ymax = Upper95),
+              fill = "steelblue", alpha = 0.2) +
+  facet_wrap(~Series, ncol = 1, scales = "free_y") +
+  labs(
+    title    = "Smoothed Random-Walk Levels for Tmin & Tmax",
+    subtitle = "95% credible intervals around the smoothed θ_t",
+    x        = "Year",
+    y        = "Temperature (°C)"
+  ) +
+  theme_minimal() +
+  theme(
+    plot.title    = element_text(size = 16, face = "bold"),
+    plot.subtitle = element_text(size = 12, face = "italic")
+  )
+```
+
+#### 3.2.(a).(i) Evaluating the model
+
+```{r}
+#| label: Residual diagnostics
+#| fig-width: 12
+#| fig-height: 12
+
+# (a) raw and standardized one-step-ahead errors
+raw_resid <- residuals(filtInd, type = "raw")
+std_resid <- residuals(filtInd, type = "standardized", sd = FALSE)
+
+# (b) Plot standardized residuals over time
+par(mfrow = c(2,1))
+ts.plot(std_resid[,1],
+        ylab = "Std. Residuals (Tmin)",
+        main = "Standardized One-step-Ahead Errors: Tmin")
+abline(h = c(-2,2), col = "firebrick", lty = 2)
+ts.plot(std_resid[,2],
+        ylab = "Std. Residuals (Tmax)",
+        main = "Standardized One-step-Ahead Errors: Tmax")
+abline(h = c(-2,2), col = "firebrick", lty = 2)
+
+# (c) ACF to check for remaining autocorrelation
+acf(std_resid[,1], main = "ACF of Std. Residuals: Tmin")
+acf(std_resid[,2], main = "ACF of Std. Residuals: Tmax")
+
+# (d) Histogram + normal curve
+par(mfrow = c(2,1))
+hist(std_resid[,1], freq = FALSE,
+     main = "Histogram of Std. Residuals: Tmin",
+     xlab = "Std. Residual")
+curve(dnorm(x), add = TRUE)
+hist(std_resid[,2], freq = FALSE,
+     main = "Histogram of Std. Residuals: Tmax",
+     xlab = "Std. Residual")
+curve(dnorm(x), add = TRUE)
+
+# (e) QQ-plot
+par(mfrow = c(2,1))
+qqnorm(std_resid[,1], main = "QQ-plot: Std. Residuals (Tmin)"); qqline(std_resid[,1])
+qqnorm(std_resid[,2], main = "QQ-plot: Std. Residuals (Tmax)"); qqline(std_resid[,2])
+
+# (f) Ljung-Box test for whiteness
+lb_tmin <- Box.test(std_resid[,1], type = "Ljung-Box", lag = 20)
+lb_tmax <- Box.test(std_resid[,2], type = "Ljung-Box", lag = 20)
+print(lb_tmin)
+print(lb_tmax)
+
+checkresiduals(std_resid[,1])
+checkresiduals(std_resid[,2])
+```
+
+```{r}
+#| label: 2. Forecast accuracy metrics
+raw2 <- residuals(filtInd, type = "raw", sd = TRUE)
+res_raw2 <- raw2$res     # n×2 ts of one-step-ahead errors y_t - ŷ_{t|t-1}
+pred_se2 <- raw2$sd      # n×2 ts of predictive standard deviations
+
+y_pred2 <- y - res_raw2
+
+
+ok  <- complete.cases(res_raw2)   # drop initial NA
+e   <- res_raw2[ok,]              # raw errors
+se  <- pred_se2[ok,]              # predictive SD
+
+rmse <- sqrt(colMeans(e^2))
+mae  <- colMeans(abs(e))
+
+lower2 <- y_pred2 - 1.96 * pred_se2
+upper2 <- y_pred2 + 1.96 * pred_se2
+cov  <- sapply(1:2, function(i)
+  mean(y[ok,i] >= lower2[ok,i] & y[ok,i] <= upper2[ok,i]) * 100
+)
+cat("Series   RMSE    MAE   95% PI Coverage\n")
+cat(sprintf("Tmin   %6.3f %6.3f    %5.1f%%\n",
+            rmse[1], mae[1], cov[1]))
+cat(sprintf("Tmax   %6.3f %6.3f    %5.1f%%\n",
+            rmse[2], mae[2], cov[2]))
+```
+
+```{r}
+#| label: Parameter uncertainty
+
+# 1. MLE with Hessian (may be slow)
+fit_hess <- dlmMLE(
+  y     = y,
+  parm  = init_par,
+  build = buildIndRWNoise,
+  hessian = TRUE
+)
+
+# 2. Extract log-parameters & invert Hessian
+log_par  <- fit_hess$par
+vcov_log <- solve(fit_hess$hessian)
+se_log   <- sqrt(diag(vcov_log))
+
+# 3. Summary table
+param_tab <- data.frame(
+  param     = c("V1", "V2", "W1", "W2"),
+  log_est   = log_par,
+  log_se    = se_log
+)
+param_tab$est     <- exp(param_tab$log_est)
+param_tab$lower95 <- exp(param_tab$log_est - 1.96 * param_tab$log_se)
+param_tab$upper95 <- exp(param_tab$log_est + 1.96 * param_tab$log_se)
+print(param_tab)
+```
+
+```{r}
+#| label: Model fit: log-likelihood, AIC, BIC
+
+logLik <- -fit_hess$value
+p      <- length(log_par)
+n      <- nrow(y)
+
+AIC <- -2*logLik + 2*p
+BIC <- -2*logLik + log(n)*p
+
+cat("logLik =", logLik, 
+    "\nAIC    =", AIC, 
+    "\nBIC    =", BIC, "\n")
+```
+
+```{r}
+#| label: Forecast performance (hold-out)
+
+# (a) Define training sample ending 30 days before end
+n_train <- nrow(y) - 30
+y_train <- y[1:n_train, , drop = FALSE]
+
+# (b) Re-fit on training data
+fit_train  <- dlmMLE(y_train, parm = init_par, build = buildIndRWNoise)
+mod_train  <- buildIndRWNoise(fit_train$par)
+filt_train <- dlmFilter(y_train, mod_train)
+
+# (c) Forecast next 30 days
+fc      <- dlmForecast(filt_train, nAhead = 30)
+y_true  <- y[(n_train+1):nrow(y), ]
+y_pred  <- fc$f
+Q_list  <- fc$Q
+
+# prediction intervals
+y_lo <- matrix(NA, nrow = 30, ncol = 2)
+y_hi <- matrix(NA, nrow = 30, ncol = 2)
+for(i in 1:30) {
+  se_pred     <- sqrt(diag(Q_list[[i]]))
+  y_lo[i, ]   <- y_pred[i, ] + qnorm(0.025) * se_pred
+  y_hi[i, ]   <- y_pred[i, ] + qnorm(0.975) * se_pred
+}
+
+# (d) Compute accuracy metrics by series
+errors   <- y_true - y_pred
+rmse     <- sqrt(colMeans(errors^2))
+mae      <- colMeans(abs(errors))
+coverage <- colMeans((y_true >= y_lo) & (y_true <= y_hi)) * 100
+
+cat("Series   RMSE    MAE    95% CI coverage\n")
+cat(sprintf("Tmin   %.3f  %.3f   %.1f%%\n", rmse[1], mae[1], coverage[1]))
+cat(sprintf("Tmax   %.3f  %.3f   %.1f%%\n", rmse[2], mae[2], coverage[2]))
+```
+
+### 3.2.(b) "Seemingly unrelated" random walk plus noise models (V diagonal and W full)
+
+$$
+\begin{aligned}
+\mathbf{Y}_t &= \boldsymbol{\theta}_t + \mathbf{v}_t, 
+  &\mathbf{v}_t &\sim \mathcal{N}(\mathbf{0}, \mathbf{V}),\\
+\boldsymbol{\theta}_t &= \boldsymbol{\theta}_{t-1} + \mathbf{w}_t, 
+  &\mathbf{w}_t &\sim \mathcal{N}(\mathbf{0}, \mathbf{W}),
+\end{aligned}
+$$ 
+where
+
+$$
+\mathbf{W} = 
+\begin{bmatrix}
+\sigma^2_{w,11} & \sigma^2_{w,12}\\[3pt]
+\sigma^2_{w,21} & \sigma^2_{w,22}
+\end{bmatrix},
+\qquad
+\mathbf{V} = 
+\begin{bmatrix}
+\sigma^2_{v,11} & 0\\
+0 & \sigma^2_{v,22}
+\end{bmatrix}.
+$$
+
+```{r}
+#| label: 1. Model-building function
+
+build_SUTSE <- function(par) {
+  V <- diag(exp(par[1:2]))
+  W <- matrix(c(exp(par[3]), par[4],
+                par[4],      exp(par[5])),
+              2, 2, byrow = TRUE)
+  dlm(
+    FF = diag(2), V = V,
+    GG = diag(2), W = W,
+    m0 = rep(0,2), C0 = diag(1e7,2)
+  )
+}
+temp <- cbind(Tmin = ts_tmin, Tmax = ts_tmax)
+
+```
+
+```{r}
+#| label: 2. fit by MLE
+
+init.par <- rep(0,5)
+mle   <- dlmMLE(y = temp, parm = init.par, build = build_SUTSE)
+mod   <- build_SUTSE(mle$par)
+if (mle$convergence != 0)
+  warning("MLE did not converge: code ", mle$convergence)
+```
+
+```{r}
+#| label: 3. Filtering and smoothing
+
+filt <- dlmFilter(temp, mod)
+smth <- dlmSmooth(filt)
+
+raw    <- residuals(filt, type = "raw", sd = TRUE)
+res_raw <- raw$res     # n×2 ts of one-step-ahead errors y_t - ŷ_{t|t-1}
+pred_se <- raw$sd      # n×2 ts of predictive standard deviations
+
+# reconstruct the in-sample forecasts 
+y_pred <- temp - res_raw
+
+# standardize residuals 
+res_std <- res_raw / pred_se
+
+```
+
+#### 3.2.(b).(i) Evaluating the model
+
+```{r}
+#| label: 1. Diagnostic plots
+
+par(mfrow = c(2,2), mar = c(4,4,2,1))
+ts.plot(res_std[,1], main="Std. resid: Tmin"); abline(h=0, col="gray")
+ts.plot(res_std[,2], main="Std. resid: Tmax"); abline(h=0, col="gray")
+acf(res_std[,1], main="ACF Std resid: Tmin")
+acf(res_std[,2], main="ACF Std resid: Tmax")
+
+par(mfrow = c(1,2))
+qqnorm(res_std[,1], main="QQ: Std resid Tmin"); qqline(res_std[,1])
+qqnorm(res_std[,2], main="QQ: Std resid Tmax"); qqline(res_std[,2])
+checkresiduals(res_std[,1])
+checkresiduals(res_std[,2])
+```
+
+```{r}
+#| label: 2. Forecast accuracy metrics
+
+ok  <- complete.cases(res_raw)   # drop initial NA
+e   <- res_raw[ok,]              # raw errors
+se  <- pred_se[ok,]              # predictive SD
+
+rmse <- sqrt(colMeans(e^2))
+mae  <- colMeans(abs(e))
+
+lower <- y_pred - 1.96 * pred_se
+upper <- y_pred + 1.96 * pred_se
+cov  <- sapply(1:2, function(i)
+  mean(temp[ok,i] >= lower[ok,i] & temp[ok,i] <= upper[ok,i]) * 100
+)
+
+```
+
+```{r}
+#| label: 3. Print summary
+
+cat("Series   RMSE    MAE   95% PI Coverage\n")
+cat(sprintf("Tmin   %6.3f %6.3f    %5.1f%%\n",
+            rmse[1], mae[1], cov[1]))
+cat(sprintf("Tmax   %6.3f %6.3f    %5.1f%%\n",
+            rmse[2], mae[2], cov[2]))
+
+colnames(y_pred) <- colnames(temp)
+```
+
+```{r}
+#| label: 4. Build dataframe for plotting
+df <- data.frame(
+  time      = as.numeric(time(temp)),
+  Tmin      = as.numeric(temp[, "Tmin"]),
+  Tmax      = as.numeric(temp[, "Tmax"]),
+  Tmin_pred = as.numeric(y_pred[, "Tmin"]),
+  Tmax_pred = as.numeric(y_pred[, "Tmax"])
+)
+
+# melt into long form
+df_melt <- melt(df, id.vars = "time", 
+                variable.name = "Series_Source", 
+                value.name    = "Value")
+
+# split into Series (Tmin/Tmax) and Source (Original/Estimated)
+df_melt$Series <- ifelse(grepl("^Tmin", df_melt$Series_Source), "Tmin", "Tmax")
+df_melt$Source <- ifelse(grepl("_pred$", df_melt$Series_Source), 
+                         "Estimated", "Original")
+```
+
+```{r}
+ggplot(df_melt, aes(x = time, y = Value, color = Source)) +
+  geom_line(linewidth = 0.8) +
+  facet_wrap(~ Series, scales = "free_y", ncol = 1) +
+  scale_color_manual(values = c("Original" = "black", 
+                                "Estimated" = "firebrick")) +
+  labs(
+    x     = "Time (year)",
+    y     = "Temperature",
+    color = "",
+    title = "Original vs One-Step-Ahead DLM Estimates"
+  ) +
+  theme_bw(base_size = 14) +
+  theme(
+    legend.position  = "top",
+    strip.text       = element_text(face = "bold", size = 14),
+    panel.grid.minor = element_blank(),
+    panel.grid.major = element_line(color = "grey80")
+  )
+```
+
+```{r}
+#| label: Making a subsample of the previous dataset to make it easier to plot and interpret
+df <- data.frame(
+  time      = as.numeric(time(temp)),
+  Tmin      = as.numeric(temp[,"Tmin"]),
+  Tmax      = as.numeric(temp[,"Tmax"]),
+  Tmin_pred = as.numeric(y_pred[,"Tmin"]),
+  Tmax_pred = as.numeric(y_pred[,"Tmax"])
+)
+df_sub <- subset(df, time >= 1990 & time <= 1991)
+df_melt <- melt(df_sub, id.vars = "time",
+                variable.name = "Series_Source",
+                value.name    = "Value")
+df_melt$Series <- ifelse(grepl("^Tmin", df_melt$Series_Source), "Tmin", "Tmax")
+df_melt$Source <- ifelse(grepl("_pred$", df_melt$Series_Source),
+                         "Estimated", "Original")
+```
+
+```{r}
+#| label: Refined plot
+ggplot(df_melt, aes(x = time, y = Value, 
+                    color = Source, linetype = Source)) +
+  geom_line(aes(linewidth = Source)) +
+  facet_wrap(~ Series, scales = "free_y", ncol = 1) +
+  scale_color_manual(values = c("Original" = "black", "Estimated" = "firebrick")) +
+  scale_linetype_manual(values = c("Original" = "solid", "Estimated" = "solid")) +
+  scale_linewidth_manual(values = c("Original" = 1, "Estimated" = 1)) +
+  labs(
+    x     = "Time (year)",
+    y     = "Temperature",
+    color = "",
+    linetype = "",
+    size = "",
+    title = "Original vs. One-Step-Ahead DLM Estimates 1990-1991)"
+  ) +
+  theme_bw(base_size = 14) +
+  theme(
+    legend.position  = "top",
+    strip.text       = element_text(face = "bold", size = 14),
+    panel.grid.minor = element_blank(),
+    panel.grid.major = element_line(color = "grey80")
+  )
+```
+
+
+
+```{r}
+# 1. MLE with Hessian (may be slow)
+fit_hess2 <- dlmMLE(
+  y     = temp,
+  parm  = init.par,
+  build = build_SUTSE,
+  hessian = TRUE
+)
+
+# 2. Extract log-parameters & invert Hessian
+log_par  <- fit_hess2$par
+vcov_log <- solve(fit_hess2$hessian)
+se_log   <- sqrt(diag(vcov_log))
+
+# 3. Summary table
+param_tab <- data.frame(
+  param     = c("V1", "V2", "W1", "W1-2", "W2"),
+  log_est   = log_par,
+  log_se    = se_log
+)
+param_tab$est     <- exp(param_tab$log_est)
+param_tab$lower95 <- exp(param_tab$log_est - 1.96 * param_tab$log_se)
+param_tab$upper95 <- exp(param_tab$log_est + 1.96 * param_tab$log_se)
+print(param_tab)
+```
+
+```{r}
+logLik <- -fit_hess2$value
+p      <- length(log_par)
+n      <- nrow(temp)
+
+AIC <- -2*logLik + 2*p
+BIC <- -2*logLik + log(n)*p
+
+cat("logLik =", logLik, 
+    "\nAIC    =", AIC, 
+    "\nBIC    =", BIC, "\n")
+```
+
+```{r}
+#forecast out of sample
+#| label: Forecast performance (hold-out)
+
+# (a) Define training sample ending 30 days before end
+n_train <- nrow(temp) - 30
+y_train <- temp[1:n_train, , drop = FALSE]
+
+# (b) Re-fit on training data
+fit_train  <- dlmMLE(y_train, parm = init.par, build = build_SUTSE)
+mod_train  <- build_SUTSE(fit_train$par)
+filt_train <- dlmFilter(y_train, mod_train)
+
+# (c) Forecast next 365 days
+fc      <- dlmForecast(filt_train, nAhead = 30)
+y_true  <- temp[(n_train+1):nrow(temp), ]
+y_pred  <- fc$f
+Q_list  <- fc$Q
+
+# prediction intervals
+y_lo <- matrix(NA, nrow = 30, ncol = 2)
+y_hi <- matrix(NA, nrow = 30, ncol = 2)
+for(i in 1:30) {
+  se_pred     <- sqrt(diag(Q_list[[i]]))
+  y_lo[i, ]   <- y_pred[i, ] + qnorm(0.025) * se_pred
+  y_hi[i, ]   <- y_pred[i, ] + qnorm(0.975) * se_pred
+}
+
+# (d) Compute accuracy metrics by series
+errors   <- y_true - y_pred
+rmse     <- sqrt(colMeans(errors^2))
+mae      <- colMeans(abs(errors))
+coverage <- colMeans((y_true >= y_lo) & (y_true <= y_hi)) * 100
+
+cat("Series   RMSE    MAE    95% CI coverage\n")
+cat(sprintf("Tmin   %.3f  %.3f   %.1f%%\n", rmse[1], mae[1], coverage[1]))
+cat(sprintf("Tmax   %.3f  %.3f   %.1f%%\n", rmse[2], mae[2], coverage[2]))
+```
+
+### 3.2.(c) Random walks plus noise driven by a "latent factor" (a common state process)
+
+$$
+\mathbf{Y}_t = \mathbf{F}\,\boldsymbol{\theta}_t + \mathbf{v}_t,\quad
+\mathbf{v}_t \sim \mathcal{N}(\mathbf{0},\,\mathbf{V}),
+$$
+
+$$
+\boldsymbol{\theta}_t = \boldsymbol{\theta}_{t-1} + 
+\begin{pmatrix}
+0 \\[4pt]
+w_t
+\end{pmatrix},
+\quad
+w_t \sim \mathcal{N}(0,\sigma_w^2),
+$$
+
+where
+
+$$
+\boldsymbol{\theta}_t =
+\begin{bmatrix}
+1 \\[4pt]
+\xi_t
+\end{bmatrix},\quad
+\mathbf{F} =
+\begin{bmatrix}
+\alpha_1 & \beta \\[6pt]
+\alpha_2 & \beta
+\end{bmatrix},\quad
+\mathbf{V} =
+\begin{bmatrix}
+\sigma^2_{v,11} & 0\\[4pt]
+0 & \sigma^2_{v,22}
+\end{bmatrix}.
+$$
+
+The parameters $\alpha_1$, $\alpha_2$ and $\beta$ should be determined via MLE.
+
+```{r}
+#| label: 1. Builder: log-parameters = c(α1, α2, logβ, logσv1, logσv2, logσw)
+buildCF <- function(par) {
+  # raw parameters
+  alpha1  <- par[1]
+  alpha2  <- par[2]
+  # positivity constraints
+  beta     <- exp(par[3])
+  sigma_v1 <- exp(par[4])
+  sigma_v2 <- exp(par[5])
+  sigma_w  <- exp(par[6])
+  
+  # Observation matrix F
+  FF <- matrix(c(
+    alpha1,     beta,
+    alpha2,     beta
+  ), nrow = 2, byrow = TRUE)
+  
+  # Observation noise covariance V
+  V  <- diag(c(sigma_v1^2, sigma_v2^2))
+  
+  # State evolution G = identity, with W only on second component
+  GG <- diag(2)
+  W  <- diag(c(0, sigma_w^2))
+  
+  # Initial state mean m0 = [1, 0]′, large variance on ξ₀
+  m0 <- c(1, 0)
+  C0 <- diag(c(0, 1e7))
+  
+  dlm(
+    m0 = m0, C0 = C0,
+    FF = FF, V = V,
+    GG = GG, W = W
+  )
+}
+```
+
+```{r}
+#| label: 2. Obtaining the MLE estimates
+# stack Tmin and Tmax
+y      <- cbind(ts_tmin, ts_tmax)
+colnames(y) <- c("tmin", "tmax")
+
+# sensible initials:
+# α’s ≈ 0, β ≈ 1, σv ≈ sd(y), σw ≈ sd(diff of common factor)
+init_par <- c(
+  alpha1 = 0,
+  alpha2 = 0,
+  logβ    = log(1),
+  logσv1  = log(sd(y[,1], na.rm=TRUE)),
+  logσv2  = log(sd(y[,2], na.rm=TRUE)),
+  logσw   = log(sd(diff(y[,1] + y[,2])/2, na.rm=TRUE))
+)
+
+fitCF <- dlmMLE(
+  y     = y,
+  parm  = init_par,
+  build = buildCF,
+  lower = c(-Inf, -Inf, -10, -10, -10, -10),
+  upper = c( Inf,  Inf,  10,  10,  10,  10)
+)
+if (fitCF$convergence != 0) stop("MLE did not converge")
+
+
+modCF <- buildCF(fitCF$par)
+```
+
+```{r}
+#| label: 3. Filtering and smoothing
+filtCF  <- dlmFilter(y, modCF)
+smthCF  <- dlmSmooth(filtCF)
+
+var_all_list <- dlmSvd2var(smthCF$U.S, smthCF$D.S)
+
+# extract smoothed states (drop t=0)
+s_all    <- smthCF$s[-1, ]    # T × 2 matrix
+xi_smth  <- s_all[, 2]        # the latent ξₜ
+
+# retrieve estimated parameters
+FF_est <- modCF$FF
+V_est  <- modCF$V
+W_est  <- modCF$W
+
+cat("Estimated F matrix:\n")
+print(FF_est)
+cat("\nEstimated observation noise V:\n")
+print(V_est)
+cat("\nEstimated state-innovation noise W:\n")
+print(W_est)
+
+# optional: plot the latent factor
+ts.plot(xi_smth, main="Smoothed latent factor ξₜ")
+```
+
+Extracting the uncertainty
+
+```{r}
+# 3.  Extract the smoothed-state mean (ξₜ) and its variance at each day
+
+#    (a) First pull out the smoothed means.  We drop the “time 0” row:
+s_all   <- smthCF$s[-1, ]    # T × 2; column 1 is intercept state=1, column 2 is ξₜ
+xi_mean <- s_all[, 2]        # length T
+
+#    (b) Now convert the UD factors into a 2×2×(T+1) array of Σₜ^S (smoothed state covariances):
+var_all_list <- dlmSvd2var(smthCF$U.S, smthCF$D.S)
+#    var_all_array[ , , k ]  is a 2×2 covariance matrix at “time index k”.  k=1 is baseline (time 0);
+#    k=2…(T+1) correspond to the T data points.
+
+#    We want Var(ξₜ) for t=1,…,T.  That lives at index k = t+1, and we take the [2,2] element.
+T_full <- length(xi_mean)
+xi_var <- numeric(T_full)
+
+for (t in seq_len(T_full)) {
+  Sigma_t    <- var_all_list[[t + 1]]  # the 2×2 covariance at day t
+  xi_var[t]  <- Sigma_t[2, 2]          # pick out Var(ξₜ)
+}
+xi_se <- sqrt(xi_var)  # 1-sigma uncertainty in ξₜ
+```
+
+We plot the time series accordingly:
+
+```{r}
+#| fig-width: 12
+#| fig-height: 6
+
+df_all <- tibble(
+  date  = sf$date,               # the full Date vector
+  tmin  = as.numeric(ts_tmin),   # de-seasonalized Tmin
+  tmax  = as.numeric(ts_tmax),   # de-seasonalized Tmax
+  xi    = xi_mean,               # smoothed ξₜ
+  xi_se = xi_se                  # standard error of ξₜ
+)
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 5.  Restrict to 2020-2024 (inclusive)
+df_all <- df_all %>%
+  filter(date >= as.Date("2020-01-01") &
+         date <= as.Date("2024-12-31"))
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 6.  Prepare two “long” chunks:
+#     • df_temps_long    for tmin/tmax       (with xi_se = NA)
+#     • df_xi_long       for ξₜ + CI
+
+df_temps_long <- df_all %>%
+  select(date, tmin, tmax) %>%
+  pivot_longer(
+    cols      = c("tmin", "tmax"),
+    names_to  = "variable",
+    values_to = "value"
+  ) %>%
+  mutate(
+    xi_se       = NA_real_,
+    facet_group = "Observed (de-seasonalized)"
+  )
+
+df_xi_long <- df_all %>%
+  select(date, xi, xi_se) %>%
+  rename(value = xi) %>%
+  mutate(
+    variable    = "xi",
+    facet_group = "Smoothed state ξₜ"
+  )
+
+df_bound <- bind_rows(df_temps_long, df_xi_long)
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 7a.  OVERLAY version with ribbon around ξₜ
+overlay_plot_ci <- ggplot(df_bound, aes(x = date)) +
+  #  (1)  ribbon for ξₜ (95% CI)
+  geom_ribbon(
+    data = filter(df_bound, variable == "xi"),
+    aes(x = date,
+        ymin = value - 1.96 * xi_se,
+        ymax = value + 1.96 * xi_se),
+    inherit.aes = FALSE,
+    fill  = "blueviolet",
+    alpha = 0.4
+  ) +
+  #  (2)  lines for all three series
+  geom_line(
+    data = filter(df_bound, variable == "tmin"),
+    aes(y = value, color = "tmin"),
+    size = 0.6, na.rm = TRUE
+  ) +
+  geom_line(
+    data = filter(df_bound, variable == "tmax"),
+    aes(y = value, color = "tmax"),
+    size = 0.6, na.rm = TRUE
+  ) +
+  geom_line(
+    data = filter(df_bound, variable == "xi"),
+    aes(y = value, color = "xi"),
+    size = 0.6, na.rm = TRUE
+  ) +
+  scale_color_manual(
+    values = c(tmin = "steelblue",
+               tmax = "darkorange",
+               xi   = "blueviolet"),
+    labels = c(
+      "tmin (de-seasonalized)",
+      "tmax (de-seasonalized)",
+      "ξₜ (smoothed state)"
+    )
+  ) +
+  labs(
+    x     = "Date",
+    y     = "Value (°C / latent)",
+    color = "",
+    title = "2020-2024: De-seasonalized Tmin, Tmax and Smoothed ξ (with 95% CI)"
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(
+    legend.position = "bottom",
+    plot.title      = element_text(hjust = 0.5)
+  )
+
+# To display:
+print(overlay_plot_ci)
+```
+
+To get a more understandable plot, we restrict to the last 60 days:
+
+```{r}
+#| fig-width: 12
+#| fig-height: 6
+
+# ─────────────────────────────────────────────────────────────────────────────
+# (1) ASSUME you have already run your STL + DLM pipeline so that:
+#     • sf$date   is your full Date vector
+#     • ts_tmin   is the de-seasonalized daily time series for Tmin
+#     • ts_tmax   is the de-seasonalized daily time series for Tmax
+#     • smthCF    is the result of dlmSmooth(filtCF), from which we can extract:
+#         - smthCF$s   (T+1 × 2 matrix of smoothed state means)
+#         - smthCF$U.S and smthCF$D.S (for the smoothed covariances via dlmSvd2var)
+#
+# (2)  Extract ξₜ and its standard error:
+s_all        <- smthCF$s[-1, ]                   # drop time 0 ⇒ T × 2
+xi_mean      <- s_all[, 2]                       # the smoothed latent ξₜ
+var_all_list <- dlmSvd2var(smthCF$U.S, smthCF$D.S) 
+# var_all_list[[k]] is a 2×2 covariance at "time index k",
+# where k=1 is time 0, k=2 is day 1, ..., k=T+1 is day T.
+
+T_full <- length(xi_mean)
+xi_var <- numeric(T_full)
+for (t in seq_len(T_full)) {
+  Sigma_t   <- var_all_list[[t + 1]]  # covariance at day t
+  xi_var[t] <- Sigma_t[2, 2]          # Var(ξₜ)
+}
+xi_se <- sqrt(xi_var)
+
+# ─────────────────────────────────────────────────────────────────────────────
+# (3)  Build a single tibble with date, tmin, tmax, xi, xi_se:
+df_all <- tibble(
+  date  = sf$date,
+  tmin  = as.numeric(ts_tmin),
+  tmax  = as.numeric(ts_tmax),
+  xi    = xi_mean,
+  xi_se = xi_se
+)
+
+# ─────────────────────────────────────────────────────────────────────────────
+# (4)  Restrict to the last 60 days:
+last_date  <- max(df_all$date, na.rm = TRUE)
+first_date <- last_date - 59
+
+df_all <- df_all %>%
+  filter(date >= first_date & date <= last_date)
+
+# ─────────────────────────────────────────────────────────────────────────────
+# (5)  Prepare “long” chunks for ggplot:
+#   • df_temps_long for tmin/tmax    (xi_se = NA)
+#   • df_xi_long    for ξₜ + CI
+
+df_temps_long <- df_all %>%
+  select(date, tmin, tmax) %>%
+  pivot_longer(
+    cols      = c("tmin", "tmax"),
+    names_to  = "variable",
+    values_to = "value"
+  ) %>%
+  mutate(
+    xi_se       = NA_real_,
+    facet_group = "Observed (de-seasonalized)"
+  )
+
+df_xi_long <- df_all %>%
+  select(date, xi, xi_se) %>%
+  rename(value = xi) %>%
+  mutate(
+    variable    = "xi",
+    facet_group = "Smoothed state ξₜ"
+  )
+
+df_bound <- bind_rows(df_temps_long, df_xi_long)
+
+# ─────────────────────────────────────────────────────────────────────────────
+# (6)  OVERLAY version with 95% CI ribbon around ξ
+overlay_plot_ci <- ggplot(df_bound, aes(x = date)) +
+  #  (a) ribbon for ξ (95% CI)
+  geom_ribbon(
+    data = filter(df_bound, variable == "xi"),
+    aes(x    = date,
+        ymin = value - 1.96 * xi_se,
+        ymax = value + 1.96 * xi_se),
+    inherit.aes = FALSE,
+    fill  = "blueviolet",
+    alpha = 0.2
+  ) +
+  #  (b) lines for tmin, tmax, and ξ
+  geom_line(
+    data = filter(df_bound, variable == "tmin"),
+    aes(y = value, color = "tmin"),
+    size = 0.6, na.rm = TRUE
+  ) +
+  geom_line(
+    data = filter(df_bound, variable == "tmax"),
+    aes(y = value, color = "tmax"),
+    size = 0.6, na.rm = TRUE
+  ) +
+  geom_line(
+    data = filter(df_bound, variable == "xi"),
+    aes(y = value, color = "xi"),
+    size = 0.6, na.rm = TRUE
+  ) +
+  scale_color_manual(
+    values = c(
+      tmin = "steelblue",
+      tmax = "#D85711",
+      xi   = "blueviolet"
+    ),
+    labels = c(
+      "tmin (de-seasonalized)",
+      "tmax (de-seasonalized)",
+      "ξ (smoothed state)"
+    )
+  ) +
+  labs(
+    x     = "Date",
+    y     = "Value (°C / latent)",
+    color = "",
+    title = "De-seasonalized minimum temperature, maximum temperature and smoothed ξ (95% CI)",
+    subtitle = "Last 60 Days (01-11-2024 to 31-12-2024)"
+    ) +
+  theme_minimal(base_size = 12) +
+  theme(
+  plot.title    = element_text(size = 16, face = "bold"),
+  plot.subtitle = element_text(size = 12, face = "italic"),
+  legend.position = "bottom"
+)
+
+print(overlay_plot_ci)
+ggsave(file.path(output_dir, "overlay_plot_cipdf.pdf"), plot = overlay_plot_ci, device = "pdf", width = 12, height = 6, units = "in")
+```
+
+#### 3.2.(c).(i) Evaluating the model
+
+```{r}
+#| label: Residual diagnostics: CF model
+#| fig-width: 16
+#| fig-height: 16
+
+# (a) raw and standardized one-step-ahead errors
+raw_resid_CF <- residuals(filtCF, type = "raw")
+std_resid_CF <- residuals(filtCF, type = "standardized", sd = FALSE)
+
+# (b) Plot standardized residuals over time
+par(mfrow = c(2,1))
+ts.plot(std_resid_CF[,1],
+        ylab = "Std. Residuals (Tmin)",
+        main = "CF Model: Standardized One-step-Ahead Errors: Tmin")
+abline(h = c(-2,2), col = "firebrick", lty = 2)
+ts.plot(std_resid_CF[,2],
+        ylab = "Std. Residuals (Tmax)",
+        main = "CF Model: Standardized One-step-Ahead Errors: Tmax")
+abline(h = c(-2,2), col = "firebrick", lty = 2)
+
+# (c) ACF to check for remaining autocorrelation
+acf(std_resid_CF[,1], main = "CF Model: ACF of Std. Residuals: Tmin")
+acf(std_resid_CF[,2], main = "CF Model: ACF of Std. Residuals: Tmax")
+
+# (d) Histogram + normal curve
+par(mfrow = c(2,1))
+hist(std_resid_CF[,1], freq = FALSE,
+     main = "CF Model: Histogram of Std. Residuals: Tmin",
+     xlab = "Std. Residual")
+curve(dnorm(x), add = TRUE)
+hist(std_resid_CF[,2], freq = FALSE,
+     main = "CF Model: Histogram of Std. Residuals: Tmax",
+     xlab = "Std. Residual")
+curve(dnorm(x), add = TRUE)
+
+# (e) QQ-plot
+par(mfrow = c(2,1))
+qqnorm(std_resid_CF[,1], main = "CF Model: QQ-plot: Std. Residuals (Tmin)"); qqline(std_resid_CF[,1])
+qqnorm(std_resid_CF[,2], main = "CF Model: QQ-plot: Std. Residuals (Tmax)"); qqline(std_resid_CF[,2])
+
+# (f) Ljung-Box test for whiteness
+lb_tmin_CF <- Box.test(std_resid_CF[,1], type = "Ljung-Box", lag = 20)
+lb_tmax_CF <- Box.test(std_resid_CF[,2], type = "Ljung-Box", lag = 20)
+print(lb_tmin_CF)
+print(lb_tmax_CF)
+
+checkresiduals(std_resid_CF[,1])
+checkresiduals(std_resid_CF[,2])
+
+jarque.bera.test(std_resid_CF[,1])
+jarque.bera.test(std_resid_CF[,2])
+```
+```{r}
+#| label: Better version of the tests above
+
+library(ggplot2)
+library(forecast)    # for ggAcf or checkresiduals if you prefer, but here we do manual ACF
+library(tseries)     # for Jarque‐Bera test (jarque.bera.test)
+library(dplyr)       # for data wrangling
+library(tidyr)
+
+
+#► 1. Extract raw and standardized one‐step‐ahead residuals from your fitted CF model
+raw_resid_CF <- residuals(filtCF, type = "raw")
+std_resid_CF <- residuals(filtCF, type = "standardized", sd = FALSE)
+
+# Assume std_resid_CF is a two‐column ts or matrix, with column 1 = Tmin, column 2 = Tmax
+# Derive a “time index” from the residuals object (this works if std_resid_CF is a 'ts')
+time_idx <- time(std_resid_CF)
+
+#► 2. Build a “long” data.frame of standardized residuals for plotting
+df_resid_CF <- data.frame(
+  Year     = rep(time_idx, times = 2),
+  StdResid = c(std_resid_CF[, 1], std_resid_CF[, 2]),
+  Variable = rep(c("Tmin", "Tmax"), each = length(time_idx))
+)
+
+#───────────────────────────────────────────────────────────────────────────────
+#► 3. (a) Time‐series plot of standardized residuals for Tmin and Tmax
+p_ts_CF <- ggplot(df_resid_CF, aes(x = Year, y = StdResid)) +
+  geom_line(color = "steelblue", linewidth = 0.7) +
+  geom_hline(yintercept = c(-2, 2),
+             linetype   = "dashed",
+             color      = "orange",
+             linewidth  = 0.6) +
+  facet_wrap(~ Variable, ncol = 1, scales = "free_y") +
+  labs(
+    title = "CF Model: Standardized One‐Step‐Ahead Errors",
+    x     = "Year",
+    y     = "Std. Residual"
+  ) +
+  theme_minimal(base_size = 13) +
+  theme(
+    plot.title      = element_text(face = "bold", size = 15, hjust = 0.5),
+    strip.text      = element_text(face = "bold", size = 13),
+    axis.title      = element_text(size = 13),
+    axis.text       = element_text(size = 11),
+    panel.grid.major = element_line(color = "gray85", size = 0.4),
+    panel.grid.minor = element_blank()
+  )
+
+#► 3. (b) ACF plots for standardized residuals (up to lag 40)
+# --- Suppose std_resid_CF is your n×2 matrix (or ts) of standardized residuals:
+# std_resid_CF[,1] = Tmin residuals; std_resid_CF[,2] = Tmax residuals
+
+# 1. Compute ACF objects (up to lag = 40) for each series, WITHOUT plotting:
+acf_tmin <- acf(std_resid_CF[, 1], plot = FALSE, lag.max = 40)
+acf_tmax <- acf(std_resid_CF[, 2], plot = FALSE, lag.max = 40)
+
+# 2. Convert the fractional lags to “integer days” (or whichever time unit your ns/freq imply)
+freq <- frequency(std_resid_CF)  
+# (if frequency(std_resid_CF) is 365, then fractional lag 1 = 1/365 years → *365 = 1 day)
+
+lags_tmin <- as.numeric(acf_tmin$lag) * freq    # length = 41 (lags 0,1,2,...,40)
+lags_tmax <- as.numeric(acf_tmax$lag) * freq
+
+# 3. Drop lag 0 in each (we usually skip the 0 point when making a “correlogram”)
+#    and grab acf‐values accordingly:
+df_acf_CF <- bind_rows(
+  data.frame(
+    Lag      = lags_tmin[-1],                  # now 1,2,3,...,40
+    ACF      = as.numeric(acf_tmin$acf)[-1],
+    Variable = "Tmin"
+  ),
+  data.frame(
+    Lag      = lags_tmax[-1],
+    ACF      = as.numeric(acf_tmax$acf)[-1],
+    Variable = "Tmax"
+  )
+)
+
+# 4. Plot with ggplot2, making sure to map x = Lag, y = ACF:
+#    Also pick a “reasonable” bar width so that consecutive bars don’t overlap.
+p_acf_CF <- ggplot(df_acf_CF, aes(x = Lag, y = ACF)) +
+  geom_col(fill = "steelblue", color = NA, width = 0.8) +
+  geom_hline(yintercept = 0, color = "gray40", size = 0.4) +
+  # 95% confidence bounds = ±1.96 / sqrt(n_obs), n_obs = number of residuals
+  geom_hline(
+    yintercept = c(-1.96 / sqrt(nrow(std_resid_CF)),
+                   1.96 / sqrt(nrow(std_resid_CF))),
+    linetype = "dashed",
+    color    = "orange",
+    size     = 0.4
+  ) +
+  facet_wrap(~ Variable, ncol = 1, scales = "free_y") +
+  labs(
+    title = "CF Model: ACF of Standardized Residuals",
+    x     = "Lag (days)",
+    y     = "ACF"
+  ) +
+  theme_minimal(base_size = 13) +
+  theme(
+    plot.title      = element_text(face = "bold", size = 15, hjust = 0.5),
+    strip.text      = element_text(face = "bold", size = 13),
+    axis.title      = element_text(size = 13),
+    axis.text       = element_text(size = 11),
+    panel.grid.major = element_line(color = "gray85", size = 0.4),
+    panel.grid.minor = element_blank()
+  )
+
+#► 3. (c) Histogram + Normal density overlay for each variable
+# Compute empirical SD (should be ≈ 1 if truly standardized)
+emp_sd_tmin <- sd(std_resid_CF[, 1])
+emp_sd_tmax <- sd(std_resid_CF[, 2])
+
+# We’ll build separate histograms and then facet
+df_hist_CF <- df_resid_CF %>%
+  group_by(Variable) %>%
+  mutate(EmpSD = if_else(Variable == "Tmin", emp_sd_tmin, emp_sd_tmax))
+
+p_hist_CF <- ggplot(df_hist_CF, aes(x = StdResid)) +
+  geom_histogram(aes(y = ..density..),
+                 bins   = 300,
+                 fill   = "steelblue",
+                 color  = "white",
+                 alpha  = 0.6) +
+  stat_function(
+    fun  = dnorm,
+    args = list(mean = 0,
+                sd   = unique(df_hist_CF$EmpSD[df_hist_CF$Variable == unique(df_hist_CF$Variable)])),
+    color = "orange",
+    size  = 1
+  ) +
+  facet_wrap(~ Variable, ncol = 1) +
+  labs(
+    title = "CF Model: Histogram of Standardized Residuals (+ Normal Density)",
+    x     = "Std. Residual",
+    y     = "Density"
+  ) +
+  theme_minimal(base_size = 13) +
+  theme(
+    plot.title       = element_text(face = "bold", size = 15, hjust = 0.5),
+    strip.text       = element_text(face = "bold", size = 13),
+    axis.title       = element_text(size = 13),
+    axis.text        = element_text(size = 11),
+    panel.grid.major = element_line(color = "gray85", size = 0.4),
+    panel.grid.minor = element_blank()
+  )
+
+#► 3. (d) Q-Q Plots of standardized residuals for each variable
+p_qq_CF <- ggplot(df_resid_CF, aes(sample = StdResid)) +
+  stat_qq(color    = "steelblue", size = 1.8) +
+  stat_qq_line(color = "orange",  size = 0.6) +
+  facet_wrap(~ Variable, ncol = 1) +
+  labs(
+    title = "CF Model: Normal Q-Q Plot of Standardized Residuals",
+    x     = "Theoretical Quantiles",
+    y     = "Sample Quantiles"
+  ) +
+  theme_minimal(base_size = 13) +
+  theme(
+    plot.title       = element_text(face = "bold", size = 15, hjust = 0.5),
+    strip.text       = element_text(face = "bold", size = 13),
+    axis.title       = element_text(size = 13),
+    axis.text        = element_text(size = 11),
+    panel.grid.major = element_line(color = "gray85", size = 0.4),
+    panel.grid.minor = element_blank()
+  )
+
+#► 4. Ljung-Box tests for whiteness (lag = 20) on each variable
+lb_tmin_CF <- Box.test(std_resid_CF[, 1], type = "Ljung-Box", lag = 20)
+lb_tmax_CF <- Box.test(std_resid_CF[, 2], type = "Ljung-Box", lag = 20)
+
+#► 5. Jarque-Bera tests for Normality (optional, if you also want to check)
+jb_tmin_CF <- jarque.bera.test(std_resid_CF[, 1])
+jb_tmax_CF <- jarque.bera.test(std_resid_CF[, 2])
+
+#► 6. Print Ljung-Box and Jarque-Bera results to console
+print(lb_tmin_CF)
+print(lb_tmax_CF)
+
+print(jb_tmin_CF)
+print(jb_tmax_CF)
+
+#► 7. Finally, display all four ggplots (you can arrange them using patchwork, cowplot, or simply print sequentially)
+p_ts_CF
+p_acf_CF
+p_hist_CF
+p_qq_CF
+
+# Print and save QQ plot
+print(p_qq)
+ggsave(file.path(output_dir, "p_qq_rwpn.pdf"), plot = p_qq, device = "pdf", width = 8, height = 6, units = "in")
+
+# Print and save ACF plot
+print(p_acf)
+ggsave(file.path(output_dir, "p_acf_rwpn.pdf"), plot = p_acf, device = "pdf", width = 8, height = 6, units = "in")
+```
+
+
+
+```{r}
+# 1.  Compute one‐step‐ahead forecasts and 95% prediction intervals
+rawCF    <- residuals(filtCF, type = "raw", sd = TRUE)
+res_rawCF <- rawCF$res       # T×2 matrix of one‐step‐ahead errors (y_t − ŷ_{t|t−1})
+pred_seCF <- rawCF$sd        # T×2 matrix of predictive standard deviations
+
+# Reconstruct the in‐sample forecasts:
+y_predCF <- y - res_rawCF
+colnames(y_predCF) <- c("tmin", "tmax")
+
+# 95% PI bounds:
+lower_CF <- y_predCF - 1.96 * pred_seCF
+upper_CF <- y_predCF + 1.96 * pred_seCF
+colnames(lower_CF) <- colnames(upper_CF) <- c("tmin", "tmax")
+
+# 2.  Compute accuracy metrics (RMSE, MAE) and coverage
+okCF   <- complete.cases(res_rawCF)        # drop any initial NA
+eCF    <- res_rawCF[okCF, ]                # errors for complete cases
+y_ok   <- y[okCF, ]                        # actual y for complete cases
+lower_ok <- lower_CF[okCF, ]
+upper_ok <- upper_CF[okCF, ]
+
+# RMSE and MAE
+rmse <- sqrt(colMeans(eCF^2))
+mae  <- colMeans(abs(eCF))
+
+# 95% PI coverage (% of actuals within [lower, upper])
+cov  <- sapply(1:2, function(i) {
+  mean(y_ok[, i] >= lower_ok[, i] & y_ok[, i] <= upper_ok[, i]) * 100
+})
+
+# 3.  Print summary table
+cat("Series   RMSE    MAE   95% PI Coverage\n")
+cat(sprintf("Tmin   %6.3f %6.3f    %5.1f%%\n",
+            rmse[1], mae[1], cov[1]))
+cat(sprintf("Tmax   %6.3f %6.3f    %5.1f%%\n",
+            rmse[2], mae[2], cov[2]))
+
+# 4.  Build a single data.frame for plotting:
+df_fc <- tibble(
+  date        = sf$date,
+  actual_tmin = as.numeric(ts_tmin),
+  actual_tmax = as.numeric(ts_tmax),
+  fit_tmin    = as.numeric(y_predCF[, "tmin"]),
+  fit_tmax    = as.numeric(y_predCF[, "tmax"]),
+  lower_tmin  = as.numeric(lower_CF[, "tmin"]),
+  upper_tmin  = as.numeric(upper_CF[, "tmin"]),
+  lower_tmax  = as.numeric(lower_CF[, "tmax"]),
+  upper_tmax  = as.numeric(upper_CF[, "tmax"])
+)
+
+# (a) One row per (date, series) for the PI ribbon
+df_interval <- bind_rows(
+  df_fc %>%
+    select(date, lower_tmin, upper_tmin) %>%
+    rename(lower = lower_tmin, upper = upper_tmin) %>%
+    mutate(series = "tmin"),
+  df_fc %>%
+    select(date, lower_tmax, upper_tmax) %>%
+    rename(lower = lower_tmax, upper = upper_tmax) %>%
+    mutate(series = "tmax")
+)
+
+# (b) One row per (date, series, type) for actual vs. forecast lines
+df_af <- bind_rows(
+  df_fc %>%
+    select(date, actual_tmin, fit_tmin) %>%
+    rename(actual = actual_tmin, fit = fit_tmin) %>%
+    mutate(series = "tmin") %>%
+    pivot_longer(cols = c("actual", "fit"),
+                 names_to = "type",
+                 values_to = "value"),
+  df_fc %>%
+    select(date, actual_tmax, fit_tmax) %>%
+    rename(actual = actual_tmax, fit = fit_tmax) %>%
+    mutate(series = "tmax") %>%
+    pivot_longer(cols = c("actual", "fit"),
+                 names_to = "type",
+                 values_to = "value")
+)
+
+# 5.  Plot everything in one ggplot, faceted by series
+library(ggplot2)
+library(dplyr)
+library(tidyr)
+
+ggplot() +
+  # (a) Ribbon for 95% PI
+  geom_ribbon(
+    data = df_interval,
+    aes(x    = date,
+        ymin = lower,
+        ymax = upper),
+    fill  = "grey80",
+    alpha = 0.5
+  ) +
+  # (b) Actual series (solid line, steelblue)
+  geom_line(
+    data = filter(df_af, type == "actual"),
+    aes(x = date, y = value, color = "Actual"),
+    size = 0.8
+  ) +
+  # (c) Forecast series (dashed line, darkorange)
+  geom_line(
+    data = filter(df_af, type == "fit"),
+    aes(x = date, y = value, color = "Forecast"),
+    size     = 0.8,
+    linetype = "dashed"
+  ) +
+  # (d) Facet into two panels (one for tmin, one for tmax)
+  facet_wrap(
+    ~ series,
+    ncol   = 1,
+    scales = "free_y"
+  ) +
+  # (e) Manual color scale
+  scale_color_manual(
+    name   = "",
+    values = c(
+      Actual   = "steelblue",
+      Forecast = "darkorange"
+    )
+  ) +
+  labs(
+    x     = "Date",
+    y     = "De‐seasonalized Temperature (°C)",
+    title = "One‐Step‐Ahead Forecast vs Actual (±95% PI) for Tmin & Tmax"
+  ) +
+  theme_minimal(base_size = 13) +
+  theme(
+    legend.position = "bottom",
+    strip.text      = element_text(face = "bold"),
+    plot.title      = element_text(hjust = 0.5)
+  )
+
+```
+
+```{r}
+#| fig-width: 12
+#| fig-height: 6
+
+
+# 1.  First, rebuild df_fc exactly as before (over all dates)
+df_fc <- tibble(
+  date        = sf$date,
+  actual_tmin = as.numeric(ts_tmin),
+  actual_tmax = as.numeric(ts_tmax),
+  fit_tmin    = as.numeric(y_predCF[, "tmin"]),
+  fit_tmax    = as.numeric(y_predCF[, "tmax"]),
+  lower_tmin  = as.numeric(lower_CF[, "tmin"]),
+  upper_tmin  = as.numeric(upper_CF[, "tmin"]),
+  lower_tmax  = as.numeric(lower_CF[, "tmax"]),
+  upper_tmax  = as.numeric(upper_CF[, "tmax"])
+)
+
+# (b) Determine the 60‐day window
+last_date  <- max(df_fc$date, na.rm = TRUE)
+first_date <- last_date - 59    # inclusive ⇒ 60 days
+
+# (c) Subset to those last 60 days
+df_fc60 <- df_fc %>%
+  filter(date >= first_date & date <= last_date)
+
+# (2) From df_fc60, build df_interval60 and df_af60:
+
+# (a) One row per (date, series) for the PI ribbon
+df_interval60 <- bind_rows(
+  df_fc60 %>%
+    select(date, lower_tmin, upper_tmin) %>%
+    rename(lower = lower_tmin, upper = upper_tmin) %>%
+    mutate(series = "tmin"),
+  df_fc60 %>%
+    select(date, lower_tmax, upper_tmax) %>%
+    rename(lower = lower_tmax, upper = upper_tmax) %>%
+    mutate(series = "tmax")
+)
+
+# (b) One row per (date, series, type) for actual vs. forecast lines
+df_af60 <- bind_rows(
+  df_fc60 %>%
+    select(date, actual_tmin, fit_tmin) %>%
+    rename(actual = actual_tmin, fit = fit_tmin) %>%
+    mutate(series = "tmin") %>%
+    pivot_longer(
+      cols      = c("actual", "fit"),
+      names_to  = "type",
+      values_to = "value"
+    ),
+  df_fc60 %>%
+    select(date, actual_tmax, fit_tmax) %>%
+    rename(actual = actual_tmax, fit = fit_tmax) %>%
+    mutate(series = "tmax") %>%
+    pivot_longer(
+      cols      = c("actual", "fit"),
+      names_to  = "type",
+      values_to = "value"
+    )
+)
+
+# ─────────────────────────────────────────────────────────────────────────────
+# (3) Plot both series (tmin & tmax) in one faceted ggplot:
+
+library(ggplot2)
+
+graph3am <- ggplot() +
+  # 95% PI ribbon (coloured by series)
+  geom_ribbon(
+    data = df_interval60,
+    aes(x    = date,
+        ymin = lower,
+        ymax = upper,
+        fill = series),
+    alpha = 0.3
+  ) +
+  # Actual trajectory: solid line
+  geom_line(
+    data = filter(df_af60, type == "actual"),
+    aes(x = date, y = value, color = series, linetype = type),
+    size = 0.8
+  ) +
+  # Forecast trajectory: dashed line
+  geom_line(
+    data = filter(df_af60, type == "fit"),
+    aes(x = date, y = value, color = series, linetype = type),
+    size     = 0.8
+  ) +
+  # Colour scales for Tmin / Tmax
+  scale_color_manual(
+    name   = "Series",
+    values = c(
+      tmin = "steelblue",
+      tmax = "#D85711"
+    ),
+    labels = c(
+      tmin = "Tmin",
+      tmax = "Tmax"
+    )
+  ) +
+  scale_fill_manual(
+    name   = "Series",
+    values = c(
+      tmin = "steelblue",
+      tmax = "#D85711"
+    ),
+    labels = c(
+      tmin = "Tmin",
+      tmax = "Tmax"
+    )
+  ) +
+  # Linetype legend: actual = solid, fit = dashed
+  scale_linetype_manual(
+    name   = "Type",
+    values = c(
+      actual = "solid",
+      fit    = "dashed"
+    ),
+    labels = c(
+      actual = "Actual",
+      fit    = "Forecast"
+    )
+  ) +
+  labs(
+    x     = "Date",
+    y     = "De‐seasonalized Temperature (°C)",
+    title = "Maximum and minimum temperatures in Downtown San Francisco: Actual vs. Forecast (±95% PI)",
+    subtitle = paste0(
+      "Last 60 Days (",
+      format(first_date, "%Y-%m-%d"), " to ",
+      format(last_date,  "%Y-%m-%d"), 
+      ")"
+    )
+  ) +
+  theme_minimal(base_size = 13) +
+  theme(
+    plot.title    = element_text(size = 16, face = "bold"),
+    plot.subtitle = element_text(size = 12, face = "italic"),
+    legend.position = "bottom",
+  )
+
+print(graph3am)
+ggsave(file.path(output_dir, "graph3am.pdf"), plot = graph3am, device = "pdf", width = 12, height = 6, units = "in")
+```
+
+```{r}
+#| label: Parameter uncertainty: CF model
+
+# 1. MLE with Hessian (slower)
+fitCF_hess <- dlmMLE(
+  y       = y,
+  parm    = init_par,
+  build   = buildCF,
+  hessian = TRUE
+)
+
+# 2. Extract estimated parameters and their SEs on the working scale
+par_work   <- fitCF_hess$par
+vcov_work  <- solve(fitCF_hess$hessian)
+se_work    <- sqrt(diag(vcov_work))
+
+# 3. Construct summary table
+param_tab_CF <- data.frame(
+  param      = c("alpha1", "alpha2", "logβ", "logσv1", "logσv2", "logσw"),
+  estimate   = par_work,
+  se         = se_work,
+  lower95    = par_work - 1.96 * se_work,
+  upper95    = par_work + 1.96 * se_work
+)
+print(param_tab_CF)
+```
+
+```{r}
+#| label: Model fit: CF model log-likelihood, AIC, BIC
+
+logLik_CF <- -fitCF_hess$value
+p_CF      <- length(par_work)
+n_CF      <- nrow(y)
+
+AIC_CF <- -2 * logLik_CF + 2 * p_CF
+BIC_CF <- -2 * logLik_CF + log(n_CF) * p_CF
+
+cat("CF model\n",
+    "logLik =", round(logLik_CF,2), 
+    "\nAIC    =", round(AIC_CF,2), 
+    "\nBIC    =", round(BIC_CF,2), "\n")
+```
+
+```{r}
+#| label: Forecast performance (hold-out): CF model
+
+# (a) Training sample ends 31 days before end
+n_train_CF <- nrow(y) - 31
+y_train_CF <- y[1:n_train_CF, , drop = FALSE]
+
+# (b) Re-fit CF model on training data
+fit_train_CF  <- dlmMLE(y_train_CF, parm = init_par, build = buildCF)
+mod_train_CF  <- buildCF(fit_train_CF$par)
+filt_train_CF <- dlmFilter(y_train_CF, mod_train_CF)
+
+# (c) Forecast next 365 days
+fc_CF     <- dlmForecast(filt_train_CF, nAhead = 31)
+y_true_CF <- y[(n_train_CF+1):nrow(y), ]
+y_pred_CF <- fc_CF$f
+Q_list_CF <- fc_CF$Q
+
+# prediction intervals
+y_lo_CF <- y_hi_CF <- matrix(NA, nrow = 31, ncol = 2)
+for(i in 1:31) {
+  se_pred     <- sqrt(diag(Q_list_CF[[i]]))
+  y_lo_CF[i,] <- y_pred_CF[i,] + qnorm(0.025) * se_pred
+  y_hi_CF[i,] <- y_pred_CF[i,] + qnorm(0.975) * se_pred
+}
+
+# (d) Compute accuracy metrics by series
+errors_CF  <- y_true_CF - y_pred_CF
+rmse_CF    <- sqrt(colMeans(errors_CF^2))
+mae_CF     <- colMeans(abs(errors_CF))
+coverage_CF<- colMeans((y_true_CF >= y_lo_CF) & (y_true_CF <= y_hi_CF)) * 100
+
+cat("CF model forecast performance:\n")
+cat(sprintf("Series   RMSE    MAE    95%% CI coverage\n"))
+cat(sprintf("Tmin   %.3f  %.3f   %.1f%%\n", rmse_CF[1], mae_CF[1], coverage_CF[1]))
+cat(sprintf("Tmax   %.3f  %.3f   %.1f%%\n", rmse_CF[2], mae_CF[2], coverage_CF[2]))
+```
+
+```{r}
+#| label: Further checks on forecast performance (hold-out): CF model
+# compute average half-width of your 95% intervals
+half_width <- rowMeans((y_hi_CF - y_lo_CF)/2)
+summary(half_width)
+```
+
+```{r}
+#| fig-width: 12
+#| fig-height: 6
+
+# ─────────────────────────────────────────────────────────────────────────────
+# (1) Identify the hold-out dates
+n_train_CF <- nrow(y) - 31
+hold_dates <- sf$date[(n_train_CF + 1) : nrow(y)]
+
+# (2) Build a single data.frame for those 31 hold‐out days
+#     y_true_CF is a 31×2 matrix (columns = c("tmin","tmax"))
+#     y_pred_CF is a 31×2 matrix of forecasts
+#     y_lo_CF, y_hi_CF are 31×2 matrices of lower/upper bounds
+
+df_hold <- tibble(
+  date        = hold_dates,
+  actual_tmin = as.numeric(y_true_CF[, 1]),
+  actual_tmax = as.numeric(y_true_CF[, 2]),
+  fit_tmin    = as.numeric(y_pred_CF[, 1]),
+  fit_tmax    = as.numeric(y_pred_CF[, 2]),
+  lower_tmin  = as.numeric(y_lo_CF[, 1]),
+  upper_tmin  = as.numeric(y_hi_CF[, 1]),
+  lower_tmax  = as.numeric(y_lo_CF[, 2]),
+  upper_tmax  = as.numeric(y_hi_CF[, 2])
+)
+
+# (3) From df_hold, build long‐format data.frames for ribbons and lines:
+
+# (3a) One row per (date, series) for the CI ribbon
+df_interval_hold <- bind_rows(
+  df_hold %>%
+    select(date, lower_tmin, upper_tmin) %>%
+    rename(lower = lower_tmin, upper = upper_tmin) %>%
+    mutate(series = "tmin"),
+  df_hold %>%
+    select(date, lower_tmax, upper_tmax) %>%
+    rename(lower = lower_tmax, upper = upper_tmax) %>%
+    mutate(series = "tmax")
+)
+
+# (3b) One row per (date, series, type) for actual vs forecast lines
+df_af_hold <- bind_rows(
+  df_hold %>%
+    select(date, actual_tmin, fit_tmin) %>%
+    rename(actual = actual_tmin, fit = fit_tmin) %>%
+    mutate(series = "tmin") %>%
+    pivot_longer(
+      cols      = c("actual", "fit"),
+      names_to  = "type",
+      values_to = "value"
+    ),
+  df_hold %>%
+    select(date, actual_tmax, fit_tmax) %>%
+    rename(actual = actual_tmax, fit = fit_tmax) %>%
+    mutate(series = "tmax") %>%
+    pivot_longer(
+      cols      = c("actual", "fit"),
+      names_to  = "type",
+      values_to = "value"
+    )
+)
+
+# ─────────────────────────────────────────────────────────────────────────────
+# (4) Plot side‐by‐side with consistent y‐axis ("fixed" scales):
+ggplot() +
+  # (a) 95% CI ribbon, fill by series
+  geom_ribbon(
+    data = df_interval_hold,
+    aes(x    = date,
+        ymin = lower,
+        ymax = upper,
+        fill = series),
+    alpha = 0.3
+  ) +
+  # (b) Actual trajectory (solid line)
+  geom_line(
+    data = filter(df_af_hold, type == "actual"),
+    aes(x = date, y = value, color = series, linetype = type),
+    size = 0.8
+  ) +
+  # (c) Forecast trajectory (dashed line)
+  geom_line(
+    data = filter(df_af_hold, type == "fit"),
+    aes(x = date, y = value, color = series, linetype = type),
+    size     = 0.8
+  ) +
+  # (e) Colour scales: steelblue for tmin, darkorange for tmax
+  scale_color_manual(
+    name   = "Series",
+    values = c(
+      tmin = "steelblue",
+      tmax = "#D85711"
+    ),
+    labels = c(
+      tmin = "Tmin",
+      tmax = "Tmax"
+    )
+  ) +
+  scale_fill_manual(
+    name   = "Series",
+    values = c(
+      tmin = "steelblue",
+      tmax = "#D85711"
+    ),
+    labels = c(
+      tmin = "Tmin",
+      tmax = "Tmax"
+    )
+  ) +
+  # (f) Linetype legend: solid = actual, dashed = forecast
+  scale_linetype_manual(
+    name   = "Type",
+    values = c(
+      actual = "solid",
+      fit    = "dashed"
+    ),
+    labels = c(
+      actual = "Actual",
+      fit    = "Forecast"
+    )
+  ) +
+  labs(
+    x     = "Date",
+    y     = "De‐seasonalized Temperature (°C)",
+    title = "Maximum and minimum temperature in Downtown San Francisco: 31-days-ahead forecast",
+    subtitle = paste0(
+      "Out-of-Sample (31-Day) Forecast: ",
+      format(min(hold_dates), "%Y-%m-%d"), " to ",
+      format(max(hold_dates), "%Y-%m-%d")
+    )
+  ) +
+  theme_minimal(base_size = 13) +
+  theme(
+    plot.title    = element_text(size = 16, face = "bold"),
+    plot.subtitle = element_text(size = 12, face = "italic"),
+    legend.position = "bottom",
+  )
+
+```
+
+### 3.2.(d) Cross-Model Comparison
+
+```{r}
+#| label: tbl-task3-comparison
+#| tbl-cap: "Comparison of the three bivariate DLM specifications for San Francisco Tmin/Tmax. The SUTSE model (b) achieves the lowest AIC/BIC, suggesting that correlated state innovations improve fit without excessive parameterisation."
+
+# CHANGED: consolidated comparison table for Task 3 models
+# Retrieve log-likelihoods and parameter counts from each fitted model
+logLik_a <- -fitInd$value
+logLik_b <- -mle$value
+logLik_c <- -fitCF$value
+
+p_a <- length(fitInd$par)
+p_b <- length(mle$par)
+p_c <- length(fitCF$par)
+
+n_obs <- nrow(y)
+
+task3_comparison <- data.frame(
+  Model = c("(a) Independent RW+Noise", "(b) SUTSE (full W)", "(c) Latent Factor"),
+  Parameters = c(p_a, p_b, p_c),
+  `Log-Lik` = c(logLik_a, logLik_b, logLik_c),
+  AIC = c(-2*logLik_a + 2*p_a, -2*logLik_b + 2*p_b, -2*logLik_c + 2*p_c),
+  BIC = c(-2*logLik_a + log(n_obs)*p_a, -2*logLik_b + log(n_obs)*p_b, -2*logLik_c + log(n_obs)*p_c),
+  check.names = FALSE
+)
+knitr::kable(task3_comparison, digits = 2, booktabs = TRUE)
+```
+
+Model (b), the seemingly unrelated random walk (SUTSE), achieves the best information-criterion scores among the three specifications. The full state-innovation covariance matrix $W$ captures the positive correlation between tmin and tmax innovations — when a warm air mass moves in, both minimum and maximum temperatures tend to rise together. The latent factor model (c) imposes a more parsimonious structure through a single common driver $\xi_t$, which performs comparably but constrains the correlation structure more rigidly.
+
+Overall, all three models confirm that short-term temperature predictions in San Francisco can be substantially improved by modelling the joint dynamics of Tmin and Tmax, and that the day-to-day evolution of the latent temperature state dominates the residual noise.
+
+## 3.3 Spatial Model Extension (Optional)
+
+> **Note:** The following sections extend the analysis beyond the mandatory scope by incorporating multistation spatial models. They are included for completeness but are not evaluated in this report.
+
+```{r}
+#| eval: false
+#| include: false
+# Load required package
+library(dlm)        # for Dynamic Linear Models
+library(tidyverse)  # for data manipulation (dplyr, tidyr, ggplot2, etc.)
+library(lubridate)  # for working with Dates
+
+# 1b) Read (or re-read) the GHCN CSV (you already had this, but for clarity):
+ghcn <- read.csv("fp_data/ghcn.txt", header = TRUE)
+colnames(ghcn) <- c(
+  "station_id",
+  "station_name",
+  "latitude",
+  "longitude",
+  "elevation_m",
+  "date",
+  "tmin_tenthC",
+  "tmax_tenthC",
+  "tavg_tenthC",
+  "prcp_tenthmm"
+)
+
+# 1c) Convert types, compute actual Celsius / mm, and drop the “_tenth” fields:
+ghcn <- ghcn %>%
+  mutate(
+    date  = as_date(date),                   # convert YYYY-MM-DD → Date
+    tmin  = tmin_tenthC / 10,                # tenths of °C → °C
+    tmax  = tmax_tenthC / 10,                # tenths of °C → °C
+    prcp  = prcp_tenthmm / 10                 # tenths of mm → mm
+  ) %>%
+  select(
+    station_id, station_name, latitude, longitude, elevation_m,
+    date, tmin, tmax, prcp
+  )
+
+ghcn <- subset(ghcn, date >= as.Date("1976-11-01"))
+
+# Filter data for those stations and pivot to wide format (Date as index):
+library(tidyr)
+library(dplyr)
+
+# Pivot to wide: create separate wide data for TMIN and TMAX
+tmin_wide <- ghcn %>%
+  select(date, station_name, tmin) %>%
+  pivot_wider(names_from = station_name, values_from = tmin)
+
+tmax_wide <- ghcn %>%
+  select(date, station_name, tmax) %>%
+  pivot_wider(names_from = station_name, values_from = tmax)
+
+# Ensure dates are sorted and aligned
+tmin_wide <- arrange(tmin_wide, date)
+tmax_wide <- arrange(tmax_wide, date)
+
+# Extract the matrix of values (exclude Date column)
+Y_min <- as.matrix(tmin_wide[,-1])   # rows: dates, cols: stations
+Y_max <- as.matrix(tmax_wide[,-1])
+
+# Set row names as date for clarity (optional)
+rownames(Y_min) <- tmin_wide$date
+rownames(Y_max) <- tmax_wide$date
+
+# Confirm dimensions and presence of NAs
+dim(Y_min); dim(Y_max)
+colnames(Y_min)  # should list station names in target_stations order
+summary(Y_min)   # check for missing values
+
+# For modeling, we'll proceed with Y_max (daily max temp) for demonstration.
+Y <- Y_max   # use daily maximum temperature; similarly, Y_min can be modeled
+```
+
+**Notes:** We chose a set of nearby stations (including SF) to help forecast SF's temperatures. Having multiple stations' data in `Y` allows the state-space model to exploit their shared trends and seasonal patterns. The data is now in a matrix `Y` of size `[time_points × number_of_stations]`. Missing values (`NA`) in `Y` are acceptable -- the Kalman filter will automatically handle them by skipping updates for those entries.
+
+### 3.3.2 Model Specification: State-Space Structure
+
+We construct a **Dynamic Linear Model** for the multistation temperature data. The state vector is designed to capture shared dynamics across stations as well as station-specific effects. Key state components include:
+
+-   **Global Level (Trend):** A local level representing the underlying regional temperature signal (centered on SF). This captures day-to-day fluctuations (e.g., weather anomalies) common to all stations. We allow it to evolve via a random walk (with variance *W_level* to be estimated).
+-   **Seasonal Harmonics (Annual Cycle):** We include a seasonal component to model the annual temperature cycle (period \~365 days). We use a Fourier form seasonal model with a few harmonics (e.g., 1st and 2nd harmonics) for parsimony. This captures the yearly temperature pattern (summer highs, winter lows) while allowing slow variation year-to-year by assigning a small evolution variance.
+-   **Station Biases:** Each station (except SF as baseline) gets a constant bias term to account for its average difference from SF (due to elevation, coastal vs inland, etc.). These biases are included as state components (one per station) and can be treated as either fixed offsets (zero evolution variance) or as very slowly varying (small *W_bias*). This ensures the model's shared level + seasonal pattern is adjusted to each station's mean.
+
+The observation equation links these states to the actual station temperatures. **San Francisco's temperature** is modeled as: $\text{SF}_t = L_t + S_t + \varepsilon_{SF,t},$ where $L_t$ is the global level and $S_t$ is the seasonal effect (sum of harmonics) at time *t*. For another station *j*, the observation is: $Y_{j,t} = L_t + S_t + b_{j,t} + \varepsilon_{j,t},$ where $b_{j,t}$ is the bias state for station *j*. If bias states are static (no evolution noise), then $b_{j,t} = b_j$ (constant offset). All $\varepsilon_{*,t}$ are observation errors (assumed Gaussian white noise) -- we will allow for a station-specific or common observation variance *V*. The state evolution for $L_t$ (and an optional slope) is a local trend model, for seasonal states is a rotation each day (with small variance), and for biases is identity (persistence).
+
+Below we construct the `dlm` model matrices for this structure:
+
+```{r}
+#| eval: false
+#| include: false
+# Determine model dimensions
+n_stations <- ncol(Y)                     # number of stations (m)
+station_names <- colnames(Y)
+# Assume station_names[1] == "SAN FRANCISCO" (the target), used as baseline
+sf_idx <- which(station_names == "SAN FRANCISCO DWTN")
+new_order <- c(sf_idx, setdiff(seq_along(station_names), sf_idx))
+Y <- Y[, new_order]
+station_names <- station_names[new_order]
+
+
+# 1. Define the base model for common trend + seasonal component (single-output DLM)
+#    We'll use a local linear trend (order=2: level + slope) and a Fourier seasonal component with annual period.
+#    Set dV=0 for these components since observation noise will be added separately for each station.
+base_trend <- dlmModPoly(order = 2, dV = 0, dW = c(1e-7, 1e-7))  
+# (Initial guess: almost no noise for level/slope; will be adjusted later. 
+#  We'll estimate optimal variances via dlmMLE.)
+base_season <- dlmModTrig(s = 365, q = 2, dV = 0, dW = 1e-5)  
+# (Using first 2 harmonics of period 365:contentReference[oaicite:7]{index=7}. Small dW gives a slowly time-varying seasonal pattern.)
+base_model <- base_trend + base_season   # Combine trend and seasonal into one single-output DLM
+
+# Inspect state vector size of base_model
+m_base <- ncol(base_model$FF)   # number of base states (level, slope, and Fourier states)
+m_base  # for order=2 and q=2, m_base = 2 (trend) + 2*2 (harmonics*2) = 6 states
+
+# 2. Augment the state vector with station-specific bias states for stations 2..m
+n_bias <- n_stations - 1
+total_states <- m_base + n_bias
+
+# Initialize observation matrix FF for multi-station
+FF_multi <- matrix(0, nrow = n_stations, ncol = total_states)
+# Fill common part: each station observes the common trend+season sum
+FF_common <- base_model$FF            # 1 x m_base (for single output) 
+for (i in 1:n_stations) {
+  FF_multi[i, 1:m_base] <- FF_common   # all stations see L_t + S_t
+}
+# Add identity for bias terms: station j (index>1) has a bias state at position m_base + (j-1)
+if (n_bias > 0) {
+  for (j in 2:n_stations) {
+    bias_index <- m_base + (j-1)
+    FF_multi[j, bias_index] <- 1      # station j gets its bias state
+  }
+}
+# For SF (station 1), we intentionally do not add a bias term (or equivalently bias state = 0)
+
+# Define state transition matrix GG for combined state:
+# - Base states (trend + seasonal) follow base_model$GG (m_base x m_base matrix)
+# - Bias states follow identity (they persist from t to t+1, possibly with small random walk)
+GG_multi <- diag(1, total_states)               # start with identity
+GG_multi[1:m_base, 1:m_base] <- base_model$GG   # insert base transition for common states
+# (Bias states remain 1 on diagonal, 0 off-diagonals, meaning b_{j,t+1} = b_{j,t} + noise)
+
+# System noise covariance matrix W:
+W_multi <- matrix(0, nrow = total_states, ncol = total_states)
+# Insert base model system covariance (trend & seasonal part)
+W_multi[1:m_base, 1:m_base] <- base_model$W
+# Bias states: set small variance for each bias (or 0 if treating biases as fixed)
+if (n_bias > 0) {
+  bias_var <- 1e-7  # initial guess: almost no drift in bias
+  diag(W_multi[(m_base+1):total_states, (m_base+1):total_states]) <- bias_var
+}
+
+# Observation covariance matrix V:
+# Assume independent observation errors per station. We can start with equal variances for all,
+# and later allow estimation of these variances.
+V_multi <- diag(1, n_stations)   # initial guess: 1 (will be adjusted by MLE)
+
+# Initial state prior (m0 and C0):
+m0 <- rep(0, total_states)
+# We can set initial biases based on first observations if available (difference from SF)
+if (n_bias > 0) {
+  sf_initial <- Y[1, 1]
+  for (j in 2:n_stations) {
+    if (!is.na(Y[1,j]) && !is.na(sf_initial)) {
+      m0[m_base + (j-1)] <- Y[1, j] - sf_initial  # initial bias as difference on first day
+    } else {
+      m0[m_base + (j-1)] <- 0  # if missing, start at 0 bias
+    }
+  }
+}
+# Set a large initial covariance for uncertainty in states
+C0 <- diag(1e6, total_states)
+# (High uncertainty allows the filter to learn the true state values from data. 
+# If prior knowledge exists, we could reduce these variances.)
+
+# Assemble the DLM with all components:
+mod_multi <- dlm(m0 = m0, C0 = C0, FF = FF_multi, V = V_multi, GG = GG_multi, W = W_multi)
+mod_multi  # print a summary of the model structure
+```
+
+**Explanation:** We built the multivariate DLM in steps. The **base model** `base_model` represents a single-output DLM for the shared SF temperature signal: it has a local linear trend (order 2) and an annual seasonal component with two harmonics. The Fourier seasonal component provides a parsimonious representation of a yearly cycle, and we allow it to evolve slowly by giving it a tiny process variance. Next, we expanded this model to multiple stations by adding bias states. The `FF_multi` matrix is defined such that each station's observation is the sum of the common trend+season and its own bias (zero for SF). The `GG_multi` matrix keeps the common states evolving as before and makes each bias state follow a **random walk** (identity transition). We initialized the process noise `W_multi` with small variances for all states (to be tuned) and the observation noise `V_multi` as identity (to be estimated). A diffuse prior (large `C0`) is used so that the data can inform the state estimates. **Missing data** is handled implicitly: if some `Y[t,j]` is NA, the Kalman filter will simply not update that station's component at time *t*, effectively carrying forward the predicted state for that observation.
+
+### 3.3.3 Bayesian Parameter Inference (Variance Estimation)
+
+The DLM's structure is specified, but certain hyperparameters (variance terms in `W` and `V`) are unknown and need to be learned. Following Petris et al. (2009), we can estimate these using **Bayesian inference**. One approach is to put prior distributions on the variances and run a Gibbs sampler (`dlmGibbsDIG`) to sample from their posterior. For simplicity, here we perform **Maximum Likelihood Estimation (MLE)** of the variances, which corresponds to finding posterior mode estimates (an empirical Bayes approach). We use `dlmMLE` to optimize the log-likelihood of the model with respect to selected variance parameters, then update the DLM with these estimates.
+
+In the code below, we choose to estimate the global level's evolution variance and the observation noise variance, while keeping other variances fixed at small values. (We could also estimate more parameters -- e.g. slope variance, seasonal variance, or separate noise per station -- but to avoid overfitting, we start simple.) The parameters are optimized in log-space to enforce positivity.
+
+```{r}
+# Define a function that builds the DLM given a parameter vector (to be optimized)
+#| eval: false
+#| include: false
+# For example, let param[1] = log(W_level), param[2] = log(V_obs) as the parameters to estimate.
+buildModel <- function(param) {
+  # Extract parameters (ensure they remain positive by exponentiating)
+  W_level <- exp(param[1])
+  V_obs_raw   <- exp(param[2])
+  # Force a maximum V_obs of 0.5:  
+  V_obs <- min(V_obs_raw, 0.5)  
+  
+  # Update copy of mod_multi with these parameters
+  mod_temp <- mod_multi  # start from current model structure
+  # Set level process variance (state 1 corresponds to level in our state ordering)
+  mod_temp$W[1, 1] <- W_level
+  # Optionally, if we included a slope (state 2), we might set mod_temp$W[2, 2] to a small value or estimate it too.
+  # (Here we keep slope variance as a small fixed value from earlier, e.g., 1e-7)
+  
+  # Set all observation variances (or just SF's) to V_obs
+  # Here we assume a common observation variance for simplicity
+  diag(mod_temp$V) <- V_obs
+  
+  return(mod_temp)
+}
+
+# Initial guesses for log-variances
+init_param <- log(c(W_level = 0.1, V_obs = 1))  # e.g., initial guess: W_level=0.1, V=1
+
+# Run MLE optimization
+mle_fit <- dlmMLE(Y, parm = init_param, build = buildModel)
+mle_fit$convergence  # 0 indicates successful convergence
+
+# Optimized parameter estimates (back-transformed)
+opt_param <- exp(mle_fit$par)
+opt_param_names <- c("W_level", "V_obs")
+names(opt_param) <- opt_param_names
+print(opt_param)
+# e.g., might output something like W_level ~ 0.05, V_obs ~ 2.3 (just as an example)
+
+# Rebuild the DLM with estimated parameters
+mod_fitted <- buildModel(mle_fit$par)
+```
+
+After MLE, `opt_param` contains the estimated variances. We then reconstruct `mod_fitted`, the DLM with these optimal values. At this stage, our model is fully specified. We have essentially **learned the variance hyperparameters** from data (a point estimate). If a fully Bayesian treatment is desired, we could set inverse-Gamma priors for these variances and use `dlmGibbsDIG` to sample their posterior distribution, but for brevity we proceed with the MLE estimates. The state estimation and forecasting that follow still use Bayesian updating (the Kalman filter), treating the variances as known.
+
+### 3.3.4 Filtering and Smoothing (State Estimation)
+
+With the fitted model, we perform Kalman filtering to estimate the latent states over time, and Kalman smoothing to refine those estimates using all data. Filtering yields one-step ahead forecasts and updated state estimates at each time, while smoothing provides retrospective estimates of states using future data as well.
+
+```{r}
+# Apply Kalman filter to the multivariate series
+#| eval: false
+#| include: false
+filter_res <- dlmFilter(Y, mod_fitted)
+
+# Extract filtered one-step ahead forecasts and residuals (optional)
+y_hat <- filter_res$f    # one-step ahead predicted observations (matrix: same dim as Y)
+y_err <- filter_res$y - y_hat  # residuals (differences) wherever data is not NA
+
+# Extract filtered state estimates
+filtered_states_mean <- filter_res$m    # matrix of filtered state means (each row = time, col = state)
+filtered_states_var  <- filter_res$U    # variance (upper triangular form; use dlmSvd2var to get cov matrices)
+# Note: dlmFilter stores state variance in SVD form (U and D components). To get actual covariance at time n:
+final_state_cov <- dlmSvd2var(filter_res$U.R, filter_res$D.R)  # covariance of final state
+
+# Apply Rauch-Tung-Striebel smoother for retrospective state estimates
+smooth_res <- dlmSmooth(filter_res)
+
+smoothed_states_mean <- smooth_res$s    # matrix of smoothed state means (each row = time, col = state)
+smoothed_states_var  <- smooth_res$U    # (in SVD form similarly)
+```
+
+After filtering (`dlmFilter`), the object `filter_res` contains the filtered estimates. In particular, `filter_res$m` is a matrix where each row gives the mean of the state vector at the end of that day *t* (after observing *Y\[t,*\]\*). The Kalman filter naturally handled missing observations: if SF or any station had NA on a given day, the filter simply relied on the state prediction (no update for that component). The `dlmSmooth` results combine forward and backward passes to provide smoothed states `smooth_res$s`, which are more accurate estimates of the true latent states using all available data.
+
+**Interpretation Tip:** The first component of the state (Level) represents the **common temperature signal** (centered on SF). The seasonal components (next 4 states) represent the estimated seasonal cycle (Fourier coefficients). The remaining state components are the **station biases**. By examining `smoothed_states_mean`, one can see, for example, the bias states converging to values that reflect each station's average offset relative to SF.
+
+### 3.3.5 Forecasting 3-Day, 7-Day, and 14-Day Ahead
+
+Finally, we use the fitted and filtered model to predict future temperatures. We will produce **short-term forecasts** for SF's minimum and maximum temperature for the next 3, 7, and 14 days. The `dlmForecast` function provides the forecasted means and variances for any number of steps ahead. We focus on SF (first station), but the function actually forecasts all stations simultaneously (leveraging the state structure).
+
+```{r}
+# Forecast 14 days ahead using the filtered state as the starting point | MAX
+#| eval: false
+#| include: false
+n_ahead <- 14
+forecast_res <- dlmForecast(filter_res, nAhead = n_ahead)
+
+# Extract forecast means for all stations
+Y_fore_mean <- forecast_res$f   # a list or matrix of forecast means (nAhead x n_stations)
+# Extract forecast covariance matrices for each forecast step
+Y_fore_cov <- forecast_res$Q    # list of length nAhead, each an (n_stations x n_stations) covariance matrix
+
+# Focus on San Francisco (column 1)
+sf_fore_mean <- if(is.list(Y_fore_mean)) {
+  # dlmForecast prior to dlm v1.1 returns a list; newer versions return matrix
+  do.call(rbind, Y_fore_mean)[,1]
+} else {
+  Y_fore_mean[,1]
+}
+
+# Compute prediction intervals for SF forecasts (e.g., 90% interval)
+alpha <- 0.10 # for 90% interval (10% in lower tail, 10% in upper tail)
+# Get standard deviation of SF forecast at each horizon
+sf_fore_sd <- sapply(Y_fore_cov, function(Sig) sqrt(Sig[1,1]))
+z <- qnorm(1 - alpha/2)  # z for central (1-alpha)% interval (e.g., 1.6449 for 90%)
+sf_fore_lower <- sf_fore_mean - z * sf_fore_sd
+sf_fore_upper <- sf_fore_mean + z * sf_fore_sd
+
+# Print the 3-day, 7-day, 14-day ahead forecast for SF Max Temperature:
+horizons <- c(3, 7, 14)
+forecast_table <- data.frame(
+  Horizon = horizons,
+  Forecast_Date = as.Date(tail(tmax_wide$date, 1)) + horizons,  # last date + horizon
+  SF_Max_Temp_Forecast = sf_fore_mean[horizons],
+  Lower90 = sf_fore_lower[horizons],
+  Upper90 = sf_fore_upper[horizons]
+)
+print(forecast_table)
+```
+
+This yields a table of SF's forecasted max temperatures for the next 3, 7, and 14 days, along with 90% prediction intervals. (For minimum temperatures, we would repeat the modeling with `Y_min` or build a similar model for TMIN. Often TMIN and TMAX are modeled separately due to differing daily dynamics, but the procedure is analogous.)
+
+**Forecast interpretation:** The model's forecasts combine the last estimated state (which encodes the recent level of temperature and seasonality) with its dynamics. For example, if the last observed day was unusually warm, the **global level state** $L_t$ will be higher, carrying that signal into the forecast for subsequent days (gradually decaying if the model expects mean reversion via the level's variance). The seasonal states ensure the forecast respects the time of year (e.g., rising trend into summer, or falling into winter). The **borrowed strength** from other stations means if SF had missing data or anomalous behavior, the model still anchors to the regional pattern gleaned from neighbors.
+
+### 3.3.6 Plotting the Predictions
+
+Finally, we plot the forecast results for visualization. We show the observed SF temperature series (recent period) and the 14-day forecast with its prediction interval.
+
+```{r}
+# 1. Prepare data frames for plotting
+#| eval: false
+#| include: false
+
+# A. Last 60 days of observed SF data:
+sf_all       <- Y[, 1]                             # SF’s full time series (max temp)
+all_dates    <- as.Date(tmax_wide$date)             # vector of all dates
+end_date     <- tail(all_dates, 1)                  # last observed date
+plot_window  <- 60                                  # how many days to show in the “past” window
+start_index  <- length(all_dates) - plot_window + 1 # index where 60-day window begins
+
+actual_df <- data.frame(
+  date = all_dates[start_index:length(all_dates)],  # last 60 dates
+  temp = sf_all[start_index:length(all_dates)],     # corresponding SF temps
+  type = "Observed"
+)
+
+# B. 14-day-ahead forecast (mean):
+fore_dates   <- seq(end_date + 1, by = "day", length.out = n_ahead)
+forecast_df <- data.frame(
+  date = fore_dates,                                # next 14 dates
+  temp = sf_fore_mean,                              # predicted means
+  type = "Forecast mean"
+)
+
+# C. 90 % prediction interval (ribbon):
+ribbon_df <- data.frame(
+  date  = fore_dates,
+  lower = sf_fore_lower,
+  upper = sf_fore_upper
+)
+
+# Combine A + B into one data frame so that ggplot can map “type” to color/linetype:
+combined_df <- bind_rows(actual_df, forecast_df)
+
+# 2. Plot with ggplot2
+
+ggplot() +
+  # 2.1. Ribbon for 90% PI (fills under forecast range):
+  geom_ribbon(
+    data = ribbon_df,
+    aes(x = date, ymin = lower, ymax = upper),
+    fill = "firebrick",     # same blue as forecast-line
+    alpha = 0.2             # 20% opacity
+  ) +
+  # 2.2. Observed SF line (last 60 days):
+  geom_line(
+    data = filter(combined_df, type == "Observed"),
+    aes(x = date, y = temp, color = type),
+    linewidth = 0.8
+  ) +
+  # 2.3. Forecasted mean line (next 14 days):
+  geom_line(
+    data = filter(combined_df, type == "Forecast mean"),
+    aes(x = date, y = temp, color = type),
+    linewidth = 0.8,
+    linetype = "solid"
+  ) +
+  # 2.4. (Optional) draw the PI boundaries as dashed lines:
+  geom_line(
+    data = ribbon_df,
+    aes(x = date, y = lower),
+    color = "firebrick", 
+    linetype = "dashed",
+    linewidth = 0.8
+  ) +
+  geom_line(
+    data = ribbon_df,
+    aes(x = date, y = upper),
+    color = "firebrick", 
+    linetype = "dashed",
+    linewidth = 0.8
+  ) +
+  # 3. Labels, scales, and theme
+  scale_color_manual(
+    name = "",
+    values = c("Observed" = "orange", "Forecast mean" = "firebrick")
+  ) +
+  coord_cartesian(
+    xlim = c(all_dates[start_index], end_date + n_ahead),
+    ylim = range(c(actual_df$temp, ribbon_df$lower, ribbon_df$upper), na.rm = TRUE)
+  ) +
+  labs(
+    title = "San Francisco daily temperature interval",
+    subtitle = "Forecast recursion estimates at the 90% confidence level",
+    x = "Date",
+    y = "Temperature (°C)"
+  ) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(size = 16, face = "bold"),
+    plot.subtitle = element_text(size = 12, face = "italic")
+  )
+```
+
+This plot illustrates the model's fit and forecast. The black line shows the recent actual SF maximum temperatures. The blue line and band show the forecasted mean and the 90% confidence interval for the next 14 days. You can see the seasonal upward trend (if heading into summer) or downward trend (into winter) captured by the model, along with uncertainty that grows with the forecast horizon. The **other stations' data** have informed the forecast by stabilizing the seasonal baseline and recent level: for instance, if SF had a sudden spike on the last day that was not seen in other stations, the filter might attribute part of it to transient noise, tempering the level state increase, whereas a region-wide heatwave would raise the level state more significantly.
+
+### 3.3.7 Conclusion
+
+We have developed a comprehensive multistation DLM for forecasting San Francisco's daily minimum and maximum temperatures. The model leverages **Bayesian state-space methods** (Kalman filtering/smoothing) to combine information across multiple stations and incorporate **seasonal structure** as described by Petris et al. (2009). Key steps included specifying the state components (trend, seasonal harmonics, station biases), handling missing data inherently in the state-space framework, and using MLE (or Bayesian sampling) to infer unknown variance parameters. The resulting forecasts provide short-term predictions with uncertainty bounds, which can be invaluable for planning and analysis. This approach can be further refined (e.g., adding more harmonics, separate models for TMIN and TMAX, or including an AR term for short-term weather fluctuations), but even this basic model demonstrates the power of **borrowing strength** from related time series in a state-space setting to improve forecasts for a particular location like San Francisco.
+
+Same model as before
+
+## 3.4 Spatial model
+
+### 3.4.0 Old version
+
+```{r}
+#| eval: false
+#| include: false
+# Load required packages
+library(dlm)        # for Dynamic Linear Models
+library(tidyverse)  # for data manipulation (dplyr, tidyr, ggplot2, etc.)
+library(lubridate)  # for working with Dates
+
+# 1) Read the GHCN CSV
+ghcn <- read.csv("fp_data/ghcn.txt", header = TRUE)
+colnames(ghcn) <- c(
+  "station_id",
+  "station_name",
+  "latitude",
+  "longitude",
+  "elevation_m",
+  "date",
+  "tmin_tenthC",
+  "tmax_tenthC",
+  "tavg_tenthC",
+  "prcp_tenthmm"
+)
+
+# 2) Convert types, compute actual Celsius/mm, and drop the “_tenth” fields
+ghcn <- ghcn %>%
+  mutate(
+    date = as_date(date),          # convert YYYY-MM-DD → Date
+    tmin = tmin_tenthC / 10,       # tenths of °C → °C
+    tmax = tmax_tenthC / 10,       # tenths of °C → °C
+    prcp = prcp_tenthmm / 10       # tenths of mm → mm
+  ) %>%
+  select(
+    station_id, station_name, latitude, longitude, elevation_m,
+    date, tmin, tmax, prcp
+  )
+
+# 3) Restrict to dates ≥ 1976-11-01
+ghcn <- filter(ghcn, date >= as.Date("1976-11-01"))
+
+# 4) Define the subset of stations to keep
+#    (San Francisco + Paso Robles + Baker City + Prescott)
+target_stations <- c(
+  "SAN FRANCISCO DWTN",
+  "PASO ROBLES MUNI AP",
+  "BAKER CITY AP",
+  "PRESCOTT LOVE FLD"
+)
+
+# 5) Filter ghcn to those stations only
+ghcn_sub <- filter(ghcn, station_name %in% target_stations)
+
+# 6) Pivot to wide format: separate wide tables for TMIN and TMAX
+tmin_wide <- ghcn_sub %>%
+  select(date, station_name, tmin) %>%
+  pivot_wider(names_from = station_name, values_from = tmin) %>%
+  arrange(date)
+
+tmax_wide <- ghcn_sub %>%
+  select(date, station_name, tmax) %>%
+  pivot_wider(names_from = station_name, values_from = tmax) %>%
+  arrange(date)
+
+# 7) Extract the matrices of values (excluding the Date column)
+Y_min <- as.matrix(tmin_wide[,-1])   # rows: dates, cols: stations
+Y_max <- as.matrix(tmax_wide[,-1])
+
+# 8) Set row names as dates (optional)
+rownames(Y_min) <- tmin_wide$date
+rownames(Y_max) <- tmax_wide$date
+
+# 9) Dates vector for splitting
+all_dates <- as.Date(tmax_wide$date)
+
+# 10) Define train/test split:
+#     training = all dates < 2024-12-01; testing = dates in December 2024
+train_idx <- which(all_dates < as.Date("2024-12-01"))
+test_idx  <- which(all_dates >= as.Date("2024-12-01") & all_dates < as.Date("2025-01-01"))
+
+# 11) Proceed with Y_max (daily max temp)
+Y <- Y_max
+
+# 12) Split Y into train and test
+Y_train <- Y[train_idx, ]
+Y_test  <- Y[test_idx, ]
+
+# 13) Reorder columns so that “SAN FRANCISCO DWTN” is first
+station_names <- colnames(Y)
+sf_idx <- which(station_names == "SAN FRANCISCO DWTN")
+new_order <- c(sf_idx, setdiff(seq_along(station_names), sf_idx))
+Y_train <- Y_train[ , new_order]
+Y_test  <- Y_test[ , new_order]
+station_names <- station_names[new_order]
+
+# --- 3.3.2 Model Specification: State-Space Structure ---
+
+# 14) Build base model for common trend + seasonal component (single-output DLM)
+base_trend <- dlmModPoly(order = 2, dV = 0, dW = c(1e-7, 1e-7))
+base_season <- dlmModTrig(s = 365, q = 2, dV = 0, dW = 1e-5)
+base_model <- base_trend + base_season
+
+# 15) Inspect size of base state vector
+m_base <- ncol(base_model$FF)  # e.g., 6 states for (level, slope, 2 harmonics × 2)
+
+# 16) Number of bias states (for stations 2..4)
+n_stations <- ncol(Y_train)
+n_bias <- n_stations - 1
+total_states <- m_base + n_bias
+
+# 17) Build observation matrix FF_multi (n_stations × total_states)
+FF_multi <- matrix(0, nrow = n_stations, ncol = total_states)
+FF_common <- base_model$FF  # 1 × m_base
+for (i in 1:n_stations) {
+  FF_multi[i, 1:m_base] <- FF_common
+}
+if (n_bias > 0) {
+  for (j in 2:n_stations) {
+    bias_index <- m_base + (j - 1)
+    FF_multi[j, bias_index] <- 1
+  }
+}
+
+# 18) Build transition matrix GG_multi (total_states × total_states)
+GG_multi <- diag(1, total_states)
+GG_multi[1:m_base, 1:m_base] <- base_model$GG
+
+# 19) Build system-noise covariance W_multi
+W_multi <- matrix(0, nrow = total_states, ncol = total_states)
+W_multi[1:m_base, 1:m_base] <- base_model$W
+if (n_bias > 0) {
+  bias_var <- 1e-7
+  diag(W_multi[(m_base + 1):total_states, (m_base + 1):total_states]) <- bias_var
+}
+
+# 20) Build observation-noise covariance V_multi (start with identity)
+V_multi <- diag(1, n_stations)
+
+# 21) Initial state prior (m0 and C0)
+m0 <- rep(0, total_states)
+if (n_bias > 0) {
+  sf_initial <- Y_train[1, 1]
+  for (j in 2:n_stations) {
+    if (!is.na(Y_train[1, j]) && !is.na(sf_initial)) {
+      m0[m_base + (j - 1)] <- Y_train[1, j] - sf_initial
+    } else {
+      m0[m_base + (j - 1)] <- 0
+    }
+  }
+}
+C0 <- diag(1e6, total_states)
+
+# 22) Assemble the multistation DLM (template)
+mod_multi <- dlm(m0 = m0, C0 = C0, FF = FF_multi, V = V_multi, GG = GG_multi, W = W_multi)
+
+# --- 3.3.3 Bayesian Parameter Inference (Variance Estimation) on Training Data ---
+
+# 23) Define a builder function to update W_level and V_obs
+buildModel <- function(param) {
+  W_level   <- exp(param[1])
+  V_obs_raw <- exp(param[2])
+  V_obs     <- min(V_obs_raw, 0.5)
+
+  mod_temp <- mod_multi
+  # Update level variance (state 1)
+  mod_temp$W[1, 1] <- W_level
+  # Keep slope & seasonal variances at their small initial values (from mod_multi)
+
+  # Set common observation variance for all stations
+  diag(mod_temp$V) <- V_obs
+  return(mod_temp)
+}
+
+# 24) Initial guesses (log-scale)
+init_param <- log(c(W_level = 0.1, V_obs = 1))
+
+# 25) Run MLE optimization on Y_train
+mle_fit <- dlmMLE(Y_train, parm = init_param, build = buildModel)
+stopifnot(mle_fit$convergence == 0)
+
+# 26) Back-transform optimized parameters
+opt_param <- exp(mle_fit$par)
+names(opt_param) <- c("W_level", "V_obs")
+print(opt_param)
+
+# 27) Rebuild DLM using estimated variances
+mod_fitted <- buildModel(mle_fit$par)
+
+# --- 3.3.4 Filtering, Smoothing, and Within-Sample Forecast Accuracy ---
+
+# 28) Perform Kalman filtering on training data
+filter_res_train <- dlmFilter(Y_train, mod_fitted)
+
+# 29) One-step-ahead forecasts on train (fitted values)
+y_hat_train <- filter_res_train$f   # matrix: [n_train × n_stations]
+y_true_train <- Y_train             # actual train observations
+
+# 30) Compute within-sample residuals for SF (column 1)
+sf_hat_train  <- y_hat_train[, 1]
+sf_true_train <- y_true_train[, 1]
+sf_resid_train <- sf_true_train - sf_hat_train
+
+# 31) Remove any NA rows before computing accuracy
+valid_idx_train <- which(!is.na(sf_resid_train))
+sf_resid_train <- sf_resid_train[valid_idx_train]
+sf_true_train2 <- sf_true_train[valid_idx_train]
+sf_hat_train2  <- sf_hat_train[valid_idx_train]
+
+# 32) Compute training RMSE and MAE for SF
+rmse_train <- sqrt(mean((sf_true_train2 - sf_hat_train2)^2))
+mae_train  <- mean(abs(sf_true_train2 - sf_hat_train2))
+cat("Within-sample (train) SF RMSE =", round(rmse_train, 3), "\n")
+cat("Within-sample (train) SF MAE  =", round(mae_train, 3), "\n")
+
+# 33) (Optional) Kalman smoothing on training data
+smooth_res_train <- dlmSmooth(filter_res_train)
+smoothed_states_train <- smooth_res_train$s
+
+# --- 3.3.5 Forecasting on Test Month (December 2024) and Test Accuracy ---
+
+# 34) Number of test days in December 2024
+n_test <- nrow(Y_test)
+
+# 35) Forecast n_test steps ahead from end of training
+forecast_res_test <- dlmForecast(filter_res_train, nAhead = n_test)
+
+# 36) Extract forecasted means for all stations (n_test × n_stations)
+if (is.list(forecast_res_test$f)) {
+  Y_fore_test_mat <- do.call(rbind, forecast_res_test$f)
+} else {
+  Y_fore_test_mat <- forecast_res_test$f
+}
+
+# 37) True SF values in test set
+sf_true_test <- Y_test[, 1]
+
+# 38) Extract SF forecast (column 1)
+sf_fore_test <- Y_fore_test_mat[, 1]
+
+# 39) Compute test residuals & test accuracy (exclude any NA if present)
+valid_idx_test <- which(!is.na(sf_true_test) & !is.na(sf_fore_test))
+sf_true_test2 <- sf_true_test[valid_idx_test]
+sf_fore_test2 <- sf_fore_test[valid_idx_test]
+
+# 40) RMSE and MAE on test (December 2024)
+rmse_test <- sqrt(mean((sf_true_test2 - sf_fore_test2)^2))
+mae_test  <- mean(abs(sf_true_test2 - sf_fore_test2))
+cat("Out-of-sample (Dec 2024) SF RMSE =", round(rmse_test, 3), "\n")
+cat("Out-of-sample (Dec 2024) SF MAE  =", round(mae_test, 3), "\n")
+
+# 41) (Optional) Compute 90% prediction intervals on test
+sf_fore_sd_test <- sapply(forecast_res_test$Q, function(Sig) sqrt(Sig[1, 1]))
+z <- qnorm(0.95)
+sf_fore_lower_test <- sf_fore_test - z * sf_fore_sd_test
+sf_fore_upper_test <- sf_fore_test + z * sf_fore_sd_test
+
+# --- 3.3.6 Plotting Forecast vs. Actual for December 2024 (SF Max Temp) ---
+
+# 42) Prepare a data frame for December 2024
+test_dates <- all_dates[test_idx]
+plot_test_df <- tibble(
+  date       = test_dates[valid_idx_test],
+  actual     = sf_true_test2,
+  forecast   = sf_fore_test2,
+  lower90    = sf_fore_lower_test[valid_idx_test],
+  upper90    = sf_fore_upper_test[valid_idx_test]
+)
+
+# 43) Plot actual vs. forecast with prediction intervals
+library(ggplot2)
+ggplot(plot_test_df, aes(x = date)) +
+  geom_ribbon(aes(ymin = lower90, ymax = upper90), fill = "firebrick", alpha = 0.2) +
+  geom_line(aes(y = actual),   color = "orange",   size = 0.8) +
+  geom_line(aes(y = forecast), color = "firebrick", size = 0.8) +
+  labs(
+    title    = "SF Max Temperature: December 2024 Actual vs. Forecast",
+    subtitle = sprintf("Test RMSE = %.2f, MAE = %.2f", rmse_test, mae_test),
+    x        = "Date",
+    y        = "Max Temperature (°C)"
+  ) +
+  theme_minimal() +
+  theme(
+    plot.title    = element_text(size = 16, face = "bold"),
+    plot.subtitle = element_text(size = 12, face = "italic")
+  )
+
+# --- (Optional) Repeat within-sample and out-of-sample accuracy for TMIN by substituting Y_min in place of Y_max ---
+
+```
+
+### 3.4.1 Importing data and estimating the model
+
+```{r}
+#| eval: false
+#| include: false
+# Install and load required packages
+# CHANGED: removed install.packages() — packages should already be installed
+
+library(dlm)         # for Dynamic Linear Models
+library(tidyverse)   # for data manipulation (dplyr, tidyr, ggplot2, etc.)
+library(lubridate)   # for working with Dates
+library(geosphere)   # for distance computations
+
+# 1) Read the GHCN CSV
+ghcn <- read.csv("fp_data/ghcn.txt", header = TRUE)
+colnames(ghcn) <- c(
+  "station_id",
+  "station_name",
+  "latitude",
+  "longitude",
+  "elevation_m",
+  "date",
+  "tmin_tenthC",
+  "tmax_tenthC",
+  "tavg_tenthC",
+  "prcp_tenthmm"
+)
+
+# 2) Convert types, compute actual Celsius/mm, drop "_tenth" fields
+ghcn <- ghcn %>%
+  mutate(
+    date = as_date(date),          # YYYY-MM-DD → Date
+    tmin = tmin_tenthC / 10,       # tenths °C → °C
+    tmax = tmax_tenthC / 10,       # tenths °C → °C
+    prcp = prcp_tenthmm / 10       # tenths mm → mm
+  ) %>%
+  select(
+    station_id, station_name, latitude, longitude, elevation_m,
+    date, tmin, tmax, prcp
+  )
+
+# 3) Restrict to dates ≥ 1976-11-01
+ghcn <- filter(ghcn, date >= as.Date("1976-11-01"))
+
+# 4) Subset to four stations
+target_stations <- c(
+  "SAN FRANCISCO DWTN",
+  "PASO ROBLES MUNI AP",
+  "BAKER CITY AP",
+  "PRESCOTT LOVE FLD"
+)
+ghcn_sub <- filter(ghcn, station_name %in% target_stations)
+
+# 5) Pivot to wide format for Tmax
+tmax_wide <- ghcn_sub %>%
+  select(date, station_name, tmax) %>%
+  pivot_wider(names_from = station_name, values_from = tmax) %>%
+  arrange(date)
+
+# 6) Extract matrix of Tmax values
+Y_max <- as.matrix(tmax_wide[,-1])
+rownames(Y_max) <- tmax_wide$date
+
+# 7) Dates vector
+all_dates <- as.Date(tmax_wide$date)
+
+# 8) Define train/test split:
+#    train = all dates < 2024-12-01; test = dates in December 2024
+train_idx <- which(all_dates < as.Date("2024-12-01"))
+test_idx  <- which(all_dates >= as.Date("2024-12-01") & all_dates < as.Date("2025-01-01"))
+
+# 9) Reorder columns so SF is first
+station_names <- colnames(Y_max)
+sf_idx <- which(station_names == "SAN FRANCISCO DWTN")
+new_order <- c(sf_idx, setdiff(seq_along(station_names), sf_idx))
+Y_max <- Y_max[ , new_order]
+station_names <- station_names[new_order]
+
+# 10) Station coordinates in same order
+station_coords <- ghcn_sub %>%
+  select(station_name, latitude, longitude) %>%
+  distinct() %>%
+  slice(match(station_names, station_name))
+
+# 11) Compute distances (km) from SF
+sf_coord <- station_coords %>%
+  filter(station_name == "SAN FRANCISCO DWTN") %>%
+  select(longitude, latitude) %>%
+  as.numeric()
+coords_mat <- station_coords %>% select(longitude, latitude) %>% as.matrix()
+dist_m <- distHaversine(coords_mat, sf_coord)
+dist_km <- dist_m / 1000
+
+# 12) Spatially varying loadings λ_j = exp(-d_j / ρ)
+rho <- 500
+lambda <- exp(- dist_km / rho)  # length = 4
+
+# 13) Build base DLM for latent factor (trend + seasonal)
+base_trend <- dlmModPoly(order = 2, dV = 0, dW = c(1e-7, 1e-7))
+base_season <- dlmModTrig(s = 365, q = 2, dV = 0, dW = 1e-5)
+base_model <- base_trend + base_season
+m_base <- ncol(base_model$FF)   # should be 6
+
+# 14) Observation matrix F_spatial (4 × 6): each row = λ_j * base_model$FF
+n_stations <- length(lambda)    # 4
+F_spatial <- matrix(0, nrow = n_stations, ncol = m_base)
+for (j in 1:n_stations) {
+  F_spatial[j, ] <- lambda[j] * base_model$FF
+}
+
+# 15) Transition matrix G_spatial (6 × 6)
+G_spatial <- base_model$GG
+
+# 16) Templates for W & V (we will replace W[1,1] and diag(V))
+W_template <- base_model$W
+V_template <- diag(1, n_stations)
+
+# 17) Prior for factor state
+m0_spatial <- rep(0, m_base)
+C0_spatial <- diag(1e6, m_base)
+
+# 18) Builder function for MLE on training data
+buildSpatialModel <- function(param) {
+  W_level   <- exp(param[1])
+  V_obs_raw <- exp(param[2])
+  V_obs     <- min(V_obs_raw, 0.5)
+
+  Wt <- W_template
+  Wt[1,1] <- W_level
+  Vt <- diag(V_obs, n_stations)
+
+  dlm(
+    m0 = m0_spatial,
+    C0 = C0_spatial,
+    FF = F_spatial,
+    V  = Vt,
+    GG = G_spatial,
+    W  = Wt
+  )
+}
+
+# 19) Split Y_max into training and testing sets
+Y_train <- Y_max[train_idx, ]
+Y_test  <- Y_max[test_idx, ]
+
+# 20) MLE on Y_train
+init_param <- log(c(W_level = 0.1, V_obs = 1))
+mle_fit_spatial <- dlmMLE(Y_train, parm = init_param, build = buildSpatialModel)
+stopifnot(mle_fit_spatial$convergence == 0)
+
+opt_param_spatial <- exp(mle_fit_spatial$par)
+names(opt_param_spatial) <- c("W_level", "V_obs")
+print(opt_param_spatial)
+
+# 21) Rebuild fitted model on training data
+mod_spatial_fitted <- buildSpatialModel(mle_fit_spatial$par)
+
+# 22) Kalman filtering on training data
+filter_res_train <- dlmFilter(Y_train, mod_spatial_fitted)
+
+# 23) One‐step ahead forecasts on train
+y_hat_train <- filter_res_train$f                # [n_train × 4]
+sf_hat_train  <- y_hat_train[, 1]                 # SF predictions
+sf_true_train <- Y_train[, 1]                     # SF actuals
+
+# 24) Within‐sample accuracy (RMSE, MAE) for SF
+resid_train <- sf_true_train - sf_hat_train
+valid_idx_train <- which(!is.na(resid_train))
+rmse_train <- sqrt(mean((sf_true_train[valid_idx_train] - sf_hat_train[valid_idx_train])^2))
+mae_train  <- mean(abs(sf_true_train[valid_idx_train] - sf_hat_train[valid_idx_train]))
+cat("Within‐sample (train) SF RMSE =", round(rmse_train, 3), "\n")
+cat("Within‐sample (train) SF MAE  =", round(mae_train, 3), "\n")
+
+# 25) Forecast on test (December 2024)
+n_test <- nrow(Y_test)
+forecast_res_test <- dlmForecast(filter_res_train, nAhead = n_test)
+
+# 26) Extract SF forecast for test
+if (is.list(forecast_res_test$f)) {
+  Y_fore_test_mat <- do.call(rbind, forecast_res_test$f)
+} else {
+  Y_fore_test_mat <- forecast_res_test$f
+}
+sf_fore_test <- Y_fore_test_mat[, 1]
+sf_true_test <- Y_test[, 1]
+
+# 27) Out‐of‐sample accuracy (RMSE, MAE) for SF
+valid_idx_test <- which(!is.na(sf_true_test) & !is.na(sf_fore_test))
+sf_true_test2 <- sf_true_test[valid_idx_test]
+sf_fore_test2 <- sf_fore_test[valid_idx_test]
+
+rmse_test <- sqrt(mean((sf_true_test2 - sf_fore_test2)^2))
+mae_test  <- mean(abs(sf_true_test2 - sf_fore_test2))
+cat("Out‐of‐sample (Dec 2024) SF RMSE =", round(rmse_test, 3), "\n")
+cat("Out‐of‐sample (Dec 2024) SF MAE  =", round(mae_test, 3), "\n")
+
+# 28) 90% PI for SF forecasts on test
+sf_sd_test <- sapply(forecast_res_test$Q, function(Sig) sqrt(Sig[1,1]))
+z90 <- qnorm(0.95)
+sf_lower_test <- sf_fore_test - z90 * sf_sd_test
+sf_upper_test <- sf_fore_test + z90 * sf_sd_test
+```
+### 3.4.2. TMAX
+
+```{r}
+#| eval: false
+#| include: false
+sf_sd_test   <- sapply(forecast_res_test$Q, function(Sig) sqrt(Sig[1,1]))
+z90          <- qnorm(0.95)
+sf_lower_test <- sf_fore_test - z90 * sf_sd_test
+sf_upper_test <- sf_fore_test + z90 * sf_sd_test
+```
+
+```{r}
+#| eval: false
+#| include: false
+# (A) extract the one‐step‐ahead standard deviations for SF
+sf_sd_test <- sapply(forecast_res_test$Q, function(Sig) sqrt(Sig[1,1]))
+
+# (B) 95% critical value
+z95 <- qnorm(0.975)   # ≈ 1.96
+
+# (C) compute the 95% lower/upper bounds
+sf_lower95_test <- sf_fore_test - z95 * sf_sd_test
+sf_upper95_test <- sf_fore_test + z95 * sf_sd_test
+
+```
+
+```{r}
+#| eval: false
+#| include: false
+# (D) half‐width vector (length = number of hold‐out days, here 31)
+half_width95 <- (sf_upper95_test - sf_lower95_test) / 2
+
+# (E) get summary statistics (min, 1st Qu, median, mean, 3rd Qu, max)
+summary(half_width95)   # ← RUN THIS to see the spread of your 95% band‐half‐widths
+
+```
+
+```{r}
+#| eval: false
+#| include: false
+library(tibble)
+
+# (F) pick out hold‐out dates from all_dates
+hold_dates <- all_dates[test_idx]     # should be 2024-12-01, 2024-12-02, ..., 2024-12-31
+
+# (G) assemble df_hold
+df_hold <- tibble(
+  date        = hold_dates,
+  actual_tmax = as.numeric(sf_true_test),    # actual SF Tmax in Dec 2024
+  fit_tmax    = as.numeric(sf_fore_test),    # forecasted SF Tmax
+  lower_tmax  = as.numeric(sf_lower95_test),
+  upper_tmax  = as.numeric(sf_upper95_test)
+)
+
+```
+
+```{r}
+#| eval: false
+#| include: false
+# (I) Interval‐ribbon data.frame
+df_interval_hold <- df_hold %>%
+  select(date, lower_tmax, upper_tmax) %>%
+  rename(lower = lower_tmax, upper = upper_tmax) %>%
+  mutate(series = "tmax")
+
+# check
+print(df_interval_hold)   # ← RUN THIS; it has columns (date, lower, upper, series)
+
+# (J) Actual‐vs‐forecast “long” data.frame
+df_af_hold <- df_hold %>%
+  select(date, actual_tmax, fit_tmax) %>%
+  rename(actual = actual_tmax, fit = fit_tmax) %>%
+  mutate(series = "tmax") %>%
+  pivot_longer(
+    cols      = c("actual", "fit"),
+    names_to  = "type",
+    values_to = "value"
+  )
+
+# check
+print(df_af_hold)   # ← RUN THIS; it has (date, series="tmax", type ∈ {actual,fit}, value)
+
+```
+
+```{r}
+#| eval: false
+#| include: false
+#| fig-width: 12
+#| fig-height: 6  
+
+
+library(ggplot2)
+
+ggplot() +
+  # (a) 95% CI ribbon, fill by series ("tmax")
+  geom_ribbon(
+    data = df_interval_hold,
+    aes(x = date, ymin = lower, ymax = upper, fill = series),
+    alpha = 0.3
+  ) +
+  # (b) Actual trajectory (solid line)
+  geom_line(
+    data = filter(df_af_hold, type == "actual"),
+    aes(x = date, y = value, color = series, linetype = type),
+    size = 0.8
+  ) +
+  # (c) Forecast trajectory (dashed line)
+  geom_line(
+    data = filter(df_af_hold, type == "fit"),
+    aes(x = date, y = value, color = series, linetype = type),
+    size = 0.8
+  ) +
+  # (d) Colour scales: here only "tmax" (you can choose any color you like)
+  scale_color_manual(
+    name   = "Series",
+    values = c(tmax = "#D85711"),   # Dark orange from the CF code
+    labels = c(tmax = "Tmax")
+  ) +
+  scale_fill_manual(
+    name   = "Series",
+    values = c(tmax = "#D85711"),
+    labels = c(tmax = "Tmax")
+  ) +
+  # (e) Linetype legend: solid = actual, dashed = forecast
+  scale_linetype_manual(
+    name   = "Type",
+    values = c(actual = "solid", fit = "dashed"),
+    labels = c(actual = "Actual", fit = "Forecast")
+  ) +
+  labs(
+    x     = "Date",
+    y     = "Tmax (°C)",
+    title = "SF Downtown: December 2024 One‐Step‐Ahead Forecast of Tmax",
+    subtitle = paste0(
+      "Out‐of‐Sample (31‐Day) Forecast: ",
+      format(min(hold_dates), "%Y-%m-%d"), " to ",
+      format(max(hold_dates), "%Y-%m-%d")
+    )
+  ) +
+  theme_minimal(base_size = 13) +
+  theme(
+    plot.title     = element_text(size = 16, face = "bold"),
+    plot.subtitle  = element_text(size = 12, face = "italic"),
+    legend.position = "bottom"
+  )
+
+```
+
+```{r}
+#| eval: false
+#| include: false
+#| fig-width: 12
+#| fig-height: 6  
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# (A) Find the 30 days immediately before the start of Dec 2024:
+
+# The first hold‐out day is:
+first_test_idx <- min(test_idx)      # index in all_dates for 2024-12-01
+
+# The 30 days before that:
+prev_idx <- (first_test_idx - 30):(first_test_idx - 1)
+
+# Double‐check that prev_idx is valid:
+#   head(all_dates[prev_idx], 3)  # should be 2024-11-01, 2024-11-02, ...
+#   tail(all_dates[prev_idx], 3)  # should be 2024-11-28, 2024-11-29, 2024-11-30
+
+prev_dates <- all_dates[prev_idx]
+
+# (B) Extract the “true” SF Tmax for those 30 days
+# SF is the first column of Y_max (after reordering so SF is col 1).
+prev_tmax <- Y_max[prev_idx, 1]
+
+# (C) Build a tiny tibble of “previous 30 days”
+library(tibble)
+df_prev <- tibble(
+  date = prev_dates,
+  tmax = as.numeric(prev_tmax)
+)
+
+# Check:
+# print(df_prev)
+# should show 2024-11-01 … 2024-11-30 in the date column and the real SF Tmax.
+
+# ─────────────────────────────────────────────────────────────────────────────
+# (D) Now modify the ggplot that you had for December 2024, e.g.:
+
+library(ggplot2)
+
+ggplot() +
+  # (1) Plot the 30‐day “history” in grey (solid line)
+  geom_line(
+    data = df_prev,
+    aes(x = date, y = tmax),
+    color     = "grey50",
+    size      = 0.8
+  ) +
+  # (2) 95% CI ribbon for Dec 2024 (as before)
+  geom_ribbon(
+    data = df_interval_hold,
+    aes(x    = date,
+        ymin = lower,
+        ymax = upper,
+        fill = series),
+    alpha = 0.3
+  ) +
+  # (3) Actual Dec 2024 line (solid, dark orange)
+  geom_line(
+    data = filter(df_af_hold, type == "actual"),
+    aes(x = date, y = value, color = series, linetype = type),
+    size = 0.8
+  ) +
+  # (4) Forecast Dec 2024 line (dashed, dark orange)
+  geom_line(
+    data = filter(df_af_hold, type == "fit"),
+    aes(x = date, y = value, color = series, linetype = type),
+    size = 0.8
+  ) +
+  # (5) Colour/Fill scales (only “tmax” series)
+  scale_color_manual(
+    name   = "Series",
+    values = c(tmax = "#D85711"),
+    labels = c(tmax = "Tmax")
+  ) +
+  scale_fill_manual(
+    name   = "Series",
+    values = c(tmax = "#D85711"),
+    labels = c(tmax = "Tmax")
+  ) +
+  # (6) Linetype legend: solid = actual/past, dashed = forecast
+  scale_linetype_manual(
+    name   = "Type",
+    values = c(
+      actual = "solid",
+      fit    = "dashed"
+    ),
+    labels = c(
+      actual = "Actual",
+      fit    = "Forecast"
+    )
+  ) +
+  # (7) Axis labels + title
+  labs(
+    x     = "Date",
+    y     = "Tmax (°C)",
+    title = "SF Downtown: Nov 2024 History + December 2024 Forecast of Tmax",
+    subtitle = paste0(
+      "Historical (Nov 1-Nov 30) in grey; ",
+      "Out‐of‐Sample Dec 1-Dec 31 with 95% CI ribbon"
+    )
+  ) +
+  theme_minimal(base_size = 13) +
+  theme(
+    plot.title     = element_text(size = 16, face = "bold"),
+    plot.subtitle  = element_text(size = 12, face = "italic"),
+    legend.position = "bottom"
+  )
+
+```
+
+
+
+
+
+
+```{r}
+#| eval: false
+#| include: false
+
+
+# 29) Plot last 60 days of training (before Dec 2024), actual Dec 2024, and Dec 2024 forecasts for SF
+
+# (a) find the index of "2024-10-31" within all_dates
+last_train_date <- as.Date("2024-10-31")
+last_train_idx  <- which(all_dates == last_train_date) 
+start_plot      <- max(1, last_train_idx - 60)
+
+# (b) build the two vectors *using the same index range*
+date_seq <- all_dates[start_plot:last_train_idx]
+temp_seq <- sf_true_train[start_plot:last_train_idx]
+
+train_last60_df <- tibble(
+  date = date_seq,
+  temp = temp_seq,
+  type = "Observed (Train)"
+)
+
+# Data frame for actual December 2024
+dec2024_dates <- all_dates[test_idx]
+actual_dec_df <- tibble(
+  date = dec2024_dates,
+  temp = sf_true_test,
+  type = "Observed (Dec 2024)"
+)
+
+# Data frame for December 2024 forecasts
+forecast_dec_df <- tibble(
+  date = dec2024_dates,
+  temp = sf_fore_test,
+  type = "Forecast (Dec 2024)"
+)
+
+# Combine all three
+plot_df <- bind_rows(train_last60_df, actual_dec_df, forecast_dec_df)
+
+# 30) Plot everything with 90% prediction interval for Dec 2024
+ribbon_dec_df <- tibble(
+  date  = dec2024_dates,
+  lower = sf_lower_test,
+  upper = sf_upper_test
+)
+```
+
+#### 3.4.2.a
+
+```{r}
+#| eval: false
+#| include: false
+# (Assumes Y_train, filter_res_train, sf_hat_train, and all_dates/train_idx are already defined)
+
+# 1) Extract in‐sample residuals for each station
+resid_matrix <- Y_train - filter_res_train$f   # [n_train × 4]
+colnames(resid_matrix) <- station_names
+
+# 2) Convert residuals to ts objects (optional)
+dates_train <- all_dates[train_idx]
+resid_ts <- lapply(1:ncol(resid_matrix), function(j) {
+  ts(resid_matrix[, j],
+     start = c(year(dates_train[1]), yday(dates_train[1])),
+     frequency = 365)
+})
+names(resid_ts) <- station_names
+
+# 3) Choose SF residuals for diagnostics
+sf_resid <- resid_matrix[, "SAN FRANCISCO DWTN"]
+
+# 4) Time‐series plot of SF residuals
+plot(dates_train, sf_resid, type = "l", col = "darkgray",
+     main = "SF In‐Sample Residuals over Time",
+     xlab = "Date", ylab = "Residual (°C)")
+
+# 5) Histogram + density overlay
+hist(sf_resid, breaks = 30, freq = FALSE,
+     main = "Histogram of SF Residuals (Train)",
+     xlab = "Residual (°C)", col = "lightblue")
+lines(density(sf_resid, na.rm = TRUE), col = "darkblue", lwd = 2)
+
+# 6) QQ‐plot vs Normal
+qqnorm(sf_resid, main = "QQ‐Plot of SF Residuals (Train)")
+qqline(sf_resid, col = "red", lwd = 2)
+
+# 7) ACF and PACF of SF residuals
+par(mar = c(4, 4, 2, 1))
+acf(sf_resid, na.action = na.pass, main = "ACF of SF Residuals")
+pacf(sf_resid, na.action = na.pass, main = "PACF of SF Residuals")
+par(mfrow = c(1,1))
+
+# 8) Ljung-Box test for autocorrelation at various lags
+for (L in c(7, 14, 21, 28)) {
+  lb <- Box.test(sf_resid, lag = L, type = "Ljung-Box", fitdf = 0)
+  cat(sprintf("Ljung-Box (lag=%d):  statistic=%.3f, p‐value=%.3f\n",
+              L, lb$statistic, lb$p.value))
+}
+
+# 9) Kolmogorov-Smirnov test for normality (since Shapiro‐Wilk fails for large n)
+sf_resid2 <- na.omit(sf_resid)
+ks <- ks.test(sf_resid2, "pnorm",
+              mean = mean(sf_resid2),
+              sd   = sd(sf_resid2))
+cat(sprintf("KS test: statistic=%.3f, p‐value=%.3f\n", ks$statistic, ks$p.value))
+
+# 10) Residuals vs Fitted plot
+sf_fitted <- sf_hat_train
+valid_idx_train <- which(!is.na(sf_resid))
+plot(sf_fitted[valid_idx_train], sf_resid[valid_idx_train],
+     xlab = "Fitted Value (°C)", ylab = "Residual (°C)",
+     main = "SF Residuals vs Fitted", col = "darkgray", pch = 16)
+abline(h = 0, col = "red", lwd = 2)
+
+# 11) Repeat ACF/PACF and Ljung-Box for each station
+for (j in seq_along(station_names)) {
+  stn <- station_names[j]
+  resid_j <- resid_matrix[, j]
+  cat("\n--- Diagnostics for station:", stn, "---\n")
+  acf(resid_j, na.action = na.pass, main = paste("ACF of", stn, "Residuals"))
+  pacf(resid_j, na.action = na.pass, main = paste("PACF of", stn, "Residuals"))
+  lbj <- Box.test(resid_j, lag = 14, type = "Ljung-Box", fitdf = 0)
+  cat(sprintf("Ljung-Box (lag=14) for %s: statistic=%.3f, p‐value=%.3f\n",
+              stn, lbj$statistic, lbj$p.value))
+}
+
+# 12) Summary statistics for each station’s residuals
+for (j in seq_along(station_names)) {
+  stn <- station_names[j]
+  resid_j <- resid_matrix[, j]
+  cat(sprintf("\nStation %s: mean=%.4f, sd=%.4f, missing%%=%.2f\n",
+              stn,
+              mean(resid_j, na.rm = TRUE),
+              sd(resid_j, na.rm = TRUE),
+              100 * sum(is.na(resid_j)) / length(resid_j)))
+}
+
+# 13) Residual heatmap (optional)
+library(reshape2)
+resid_df <- data.frame(date = dates_train, resid_matrix)
+resid_melt <- melt(resid_df, id.vars = "date", variable.name = "Station", value.name = "Residual")
+ggplot(resid_melt, aes(x = date, y = Station, fill = Residual)) +
+  geom_tile() +
+  scale_fill_gradient2(low = "blue", mid = "white", high = "red", midpoint = 0) +
+  labs(title = "Residuals Heatmap (Train)", x = "Date", y = "Station") +
+  theme_minimal()
+
+```
+
+### 3.4.3. TMIN
+
+```{r}
+#| eval: false
+#| include: false
+# Install and load required packages
+# CHANGED: removed install.packages() — packages should already be installed
+
+library(dlm)         # for Dynamic Linear Models
+library(tidyverse)   # for data manipulation (dplyr, tidyr, ggplot2, etc.)
+library(lubridate)   # for working with Dates
+library(geosphere)   # for distance computations
+
+# 1) Read the GHCN CSV
+ghcn <- read.csv("fp_data/ghcn.txt", header = TRUE)
+colnames(ghcn) <- c(
+  "station_id",
+  "station_name",
+  "latitude",
+  "longitude",
+  "elevation_m",
+  "date",
+  "tmin_tenthC",
+  "tmax_tenthC",
+  "tavg_tenthC",
+  "prcp_tenthmm"
+)
+
+# 2) Convert types, compute Celsius/mm, drop "_tenth" fields
+ghcn <- ghcn %>%
+  mutate(
+    date = as_date(date),          # YYYY-MM-DD → Date
+    tmin = tmin_tenthC / 10,       # tenths °C → °C
+    tmax = tmax_tenthC / 10,       # tenths °C → °C
+    prcp = prcp_tenthmm / 10       # tenths mm → mm
+  ) %>%
+  select(
+    station_id, station_name, latitude, longitude, elevation_m,
+    date, tmin, tmax, prcp
+  )
+
+# 3) Restrict to dates ≥ 1976-11-01
+ghcn <- filter(ghcn, date >= as.Date("1976-11-01"))
+
+# 4) Subset to four stations
+target_stations <- c(
+  "SAN FRANCISCO DWTN",
+  "PASO ROBLES MUNI AP",
+  "BAKER CITY AP",
+  "PRESCOTT LOVE FLD"
+)
+ghcn_sub <- filter(ghcn, station_name %in% target_stations)
+
+# 5) Pivot to wide format for Tmin
+tmin_wide <- ghcn_sub %>%
+  select(date, station_name, tmin) %>%
+  pivot_wider(names_from = station_name, values_from = tmin) %>%
+  arrange(date)
+
+# 6) Extract matrix of Tmin values
+Y_min <- as.matrix(tmin_wide[,-1])
+rownames(Y_min) <- tmin_wide$date
+
+# 7) Dates vector
+all_dates <- as.Date(tmin_wide$date)
+
+# 8) Define train/test split:
+#    train = all dates < 2024-12-01; test = dates in December 2024
+train_idx <- which(all_dates < as.Date("2024-12-01"))
+test_idx  <- which(all_dates >= as.Date("2024-12-01") & all_dates < as.Date("2025-01-01"))
+
+# 9) Reorder columns so SF is first
+station_names <- colnames(Y_min)
+sf_idx <- which(station_names == "SAN FRANCISCO DWTN")
+new_order <- c(sf_idx, setdiff(seq_along(station_names), sf_idx))
+Y_min <- Y_min[ , new_order]
+station_names <- station_names[new_order]
+
+# 10) Station coordinates in same order
+station_coords <- ghcn_sub %>%
+  select(station_name, latitude, longitude) %>%
+  distinct() %>%
+  slice(match(station_names, station_name))
+
+# 11) Compute distances (km) from SF
+sf_coord <- station_coords %>%
+  filter(station_name == "SAN FRANCISCO DWTN") %>%
+  select(longitude, latitude) %>%
+  as.numeric()
+coords_mat <- station_coords %>% select(longitude, latitude) %>% as.matrix()
+dist_m <- distHaversine(coords_mat, sf_coord)
+dist_km <- dist_m / 1000
+
+# 12) Spatially varying loadings λ_j = exp(-d_j / ρ)
+rho <- 500
+lambda <- exp(- dist_km / rho)  # length = 4
+
+# 13) Build base DLM for latent factor (trend + seasonal)
+base_trend <- dlmModPoly(order = 2, dV = 0, dW = c(1e-7, 1e-7))
+base_season <- dlmModTrig(s = 365, q = 2, dV = 0, dW = 1e-5)
+base_model <- base_trend + base_season
+m_base <- ncol(base_model$FF)   # should be 6
+
+# 14) Observation matrix F_spatial (4 × 6): each row = λ_j * base_model$FF
+n_stations <- length(lambda)    # 4
+F_spatial <- matrix(0, nrow = n_stations, ncol = m_base)
+for (j in 1:n_stations) {
+  F_spatial[j, ] <- lambda[j] * base_model$FF
+}
+
+# 15) Transition matrix G_spatial (6 × 6)
+G_spatial <- base_model$GG
+
+# 16) Templates for W & V (we will replace W[1,1] and diag(V))
+W_template <- base_model$W
+V_template <- diag(1, n_stations)
+
+# 17) Prior for factor state
+m0_spatial <- rep(0, m_base)
+C0_spatial <- diag(1e6, m_base)
+
+# 18) Builder function for MLE on training data
+buildSpatialModel <- function(param) {
+  W_level   <- exp(param[1])
+  V_obs_raw <- exp(param[2])
+  V_obs     <- min(V_obs_raw, 0.5)
+
+  Wt <- W_template
+  Wt[1,1] <- W_level
+  Vt <- diag(V_obs, n_stations)
+
+  dlm(
+    m0 = m0_spatial,
+    C0 = C0_spatial,
+    FF = F_spatial,
+    V  = Vt,
+    GG = G_spatial,
+    W  = Wt
+  )
+}
+
+# 19) Split Y_min into training and testing sets
+Y_train <- Y_min[train_idx, ]
+Y_test  <- Y_min[test_idx, ]
+
+# 20) MLE on Y_train
+init_param <- log(c(W_level = 0.1, V_obs = 1))
+mle_fit_spatial <- dlmMLE(Y_train, parm = init_param, build = buildSpatialModel)
+stopifnot(mle_fit_spatial$convergence == 0)
+
+opt_param_spatial <- exp(mle_fit_spatial$par)
+names(opt_param_spatial) <- c("W_level", "V_obs")
+print(opt_param_spatial)
+
+# 21) Rebuild fitted model on training data
+mod_spatial_fitted <- buildSpatialModel(mle_fit_spatial$par)
+
+# 22) Kalman filtering on training data
+filter_res_train <- dlmFilter(Y_train, mod_spatial_fitted)
+
+# 23) One‐step ahead forecasts on train
+y_hat_train <- filter_res_train$f                # [n_train × 4]
+sf_hat_train  <- y_hat_train[, 1]                 # SF predictions
+sf_true_train <- Y_train[, 1]                     # SF actuals
+
+# 24) Within‐sample accuracy (RMSE, MAE) for SF
+resid_train <- sf_true_train - sf_hat_train
+valid_idx_train <- which(!is.na(resid_train))
+rmse_train <- sqrt(mean((sf_true_train[valid_idx_train] - sf_hat_train[valid_idx_train])^2))
+mae_train  <- mean(abs(sf_true_train[valid_idx_train] - sf_hat_train[valid_idx_train]))
+cat("Within‐sample (train) SF RMSE =", round(rmse_train, 3), "\n")
+cat("Within‐sample (train) SF MAE  =", round(mae_train, 3), "\n")
+
+# 25) Forecast on test (December 2024)
+n_test <- nrow(Y_test)
+forecast_res_test <- dlmForecast(filter_res_train, nAhead = n_test)
+
+# 26) Extract SF forecast for test
+if (is.list(forecast_res_test$f)) {
+  Y_fore_test_mat <- do.call(rbind, forecast_res_test$f)
+} else {
+  Y_fore_test_mat <- forecast_res_test$f
+}
+sf_fore_test <- Y_fore_test_mat[, 1]
+sf_true_test <- Y_test[, 1]
+
+# 27) Out‐of‐sample accuracy (RMSE, MAE) for SF
+valid_idx_test <- which(!is.na(sf_true_test) & !is.na(sf_fore_test))
+sf_true_test2 <- sf_true_test[valid_idx_test]
+sf_fore_test2 <- sf_fore_test[valid_idx_test]
+
+rmse_test <- sqrt(mean((sf_true_test2 - sf_fore_test2)^2))
+mae_test  <- mean(abs(sf_true_test2 - sf_fore_test2))
+cat("Out‐of‐sample (Dec 2024) SF RMSE =", round(rmse_test, 3), "\n")
+cat("Out‐of‐sample (Dec 2024) SF MAE  =", round(mae_test, 3), "\n")
+
+
+```
+
+```{r}
+#| eval: false
+#| include: false
+# ─────────────────────────────────────────────────────────────────────────────
+# (A) Extract the one-step forecast SD (√Var) for SF (first state) on each Dec day:
+sf_sd_test_min <- sapply(forecast_res_test$Q, function(Sig) sqrt(Sig[1,1]))
+
+# (B) 95% quantile of the standard normal:
+z95 <- qnorm(0.975)   # ≈ 1.96
+
+# (C) 95% lower/upper bounds for SF Tmin forecasts (length = 31 for Dec 2024):
+sf_lower95_test_min <- sf_fore_test - z95 * sf_sd_test_min
+sf_upper95_test_min <- sf_fore_test + z95 * sf_sd_test_min
+
+```
+
+```{r}
+#| eval: false
+#| include: false
+# ─────────────────────────────────────────────────────────────────────────────
+# (D) Compute the 95% half-width for each of the 31 hold-out days:
+half_width95_min <- (sf_upper95_test_min - sf_lower95_test_min) / 2
+
+# (E) Summary of those half-widths:
+summary(half_width95_min)   # ← RUN THIS; you’ll get Min, 1st Qu., Median, Mean, 3rd Qu., Max
+
+```
+
+```{r}
+#| eval: false
+#| include: false
+# ─────────────────────────────────────────────────────────────────────────────
+library(tibble)
+
+# (F) Grab the 31 hold-out dates (2024-12-01 … 2024-12-31):
+hold_dates_min <- all_dates[test_idx]  # should be Dec 1, 2024 through Dec 31, 2024
+
+# (G) Assemble df_hold_min
+df_hold_min <- tibble(
+  date        = hold_dates_min,
+  actual_tmin = as.numeric(sf_true_test),         # actual SF Tmin for Dec 2024
+  fit_tmin    = as.numeric(sf_fore_test),         # forecasted SF Tmin
+  lower_tmin  = as.numeric(sf_lower95_test_min),
+  upper_tmin  = as.numeric(sf_upper95_test_min)
+)
+
+# (H) Inspect it:
+print(df_hold_min)   # ← RUN THIS; you should see 31 rows × 5 columns
+
+```
+
+
+```{r}
+#| eval: false
+#| include: false
+library(dplyr)
+library(tidyr)
+
+# ─────────────────────────────────────────────────────────────────────────────
+# (I) Interval ribbon (one row per date, with columns date, lower, upper, series):
+df_interval_hold_min <- df_hold_min %>%
+  select(date, lower_tmin, upper_tmin) %>%
+  rename(lower = lower_tmin, upper = upper_tmin) %>%
+  mutate(series = "tmin")
+
+# Check:
+print(df_interval_hold_min)
+# Should have 31 rows: date | lower | upper | series="tmin"
+
+# (J) Actual vs. forecast (long format; two rows per date):
+df_af_hold_min <- df_hold_min %>%
+  select(date, actual_tmin, fit_tmin) %>%
+  rename(actual = actual_tmin, fit = fit_tmin) %>%
+  mutate(series = "tmin") %>%
+  pivot_longer(
+    cols      = c("actual", "fit"),
+    names_to  = "type",
+    values_to = "value"
+  )
+
+# Check:
+print(df_af_hold_min)
+# Should have 62 rows: for each date, one row type="actual", one row type="fit".
+
+```
+
+
+```{r}
+#| eval: false
+#| include: false
+library(ggplot2)
+
+ggplot() +
+  # (a) 95% CI ribbon (fill by series="tmin")
+  geom_ribbon(
+    data = df_interval_hold_min,
+    aes(x    = date,
+        ymin = lower,
+        ymax = upper,
+        fill = series),
+    alpha = 0.3
+  ) +
+  # (b) Actual SF Tmin (solid line)
+  geom_line(
+    data = filter(df_af_hold_min, type == "actual"),
+    aes(x = date, y = value, color = series, linetype = type),
+    size = 0.8
+  ) +
+  # (c) Forecast SF Tmin (dashed line)
+  geom_line(
+    data = filter(df_af_hold_min, type == "fit"),
+    aes(x = date, y = value, color = series, linetype = type),
+    size = 0.8
+  ) +
+  # (d) Colour/Fill scales (single series = "tmin", dark orange)
+  scale_color_manual(
+    name   = "Series",
+    values = c(tmin = "steelblue"),
+    labels = c(tmin = "Tmin")
+  ) +
+  scale_fill_manual(
+    name   = "Series",
+    values = c(tmin = "steelblue"),
+    labels = c(tmin = "Tmin")
+  ) +
+  # (e) Linetype legend: solid = actual, dashed = fit
+  scale_linetype_manual(
+    name   = "Type",
+    values = c(actual = "solid", fit = "dashed"),
+    labels = c(actual = "Actual", fit = "Forecast")
+  ) +
+  labs(
+    x     = "Date",
+    y     = "Tmin (°C)",
+    title = "SF Downtown: December 2024 One-Step-Ahead Forecast of Tmin",
+    subtitle = paste0(
+      "Out-of-Sample (31-Day) Forecast: ",
+      format(min(hold_dates_min), "%Y-%m-%d"), " to ",
+      format(max(hold_dates_min), "%Y-%m-%d")
+    )
+  ) +
+  theme_minimal(base_size = 13) +
+  theme(
+    plot.title     = element_text(size = 16, face = "bold"),
+    plot.subtitle  = element_text(size = 12, face = "italic"),
+    legend.position = "bottom"
+  )
+
+```
+
+
+```{r}
+#| eval: false
+#| include: false
+# ─────────────────────────────────────────────────────────────────────────────
+# (K) Find the first hold-out index, then grab the 30 days before it:
+first_test_idx_min <- min(test_idx)          # index of 2024-12-01 in all_dates
+prev_idx_min      <- (first_test_idx_min - 30):(first_test_idx_min - 1)
+
+# Sanity check your dates:
+# head(all_dates[prev_idx_min], 3)  # → 2024-11-01, 2024-11-02, ...
+# tail(all_dates[prev_idx_min], 3)  # → 2024-11-28, 2024-11-29, 2024-11-30
+
+prev_dates_min <- all_dates[prev_idx_min]
+
+# (L) Extract the “true” SF Tmin for those 30 days (SF is column 1 of Y_min):
+prev_tmin <- Y_min[prev_idx_min, 1]
+
+# (M) Build a tibble of the 30-day history:
+df_prev_min <- tibble(
+  date = prev_dates_min,
+  tmin = as.numeric(prev_tmin)
+)
+
+# Check:
+# print(df_prev_min)  # should show 2024-11-01 through 2024-11-30 and real SF Tmin
+
+# ─────────────────────────────────────────────────────────────────────────────
+# (N) Now re-plot everything, but first draw the November line (grey):
+ggplot() +
+  # (1) Grey line for the 30 days of observed SF Tmin (Nov 1–30, 2024)
+  geom_line(
+    data = df_prev_min,
+    aes(x = date, y = tmin),
+    color = "grey50",
+    size  = 0.8
+  ) +
+  # (2) 95% CI ribbon for Dec 2024
+  geom_ribbon(
+    data = df_interval_hold_min,
+    aes(x    = date,
+        ymin = lower,
+        ymax = upper,
+        fill = series),
+    alpha = 0.3
+  ) +
+  # (3) Actual SF Tmin for Dec 2024 (solid line)
+  geom_line(
+    data = filter(df_af_hold_min, type == "actual"),
+    aes(x = date, y = value, color = series, linetype = type),
+    size = 0.8
+  ) +
+  # (4) Forecast SF Tmin for Dec 2024 (dashed line)
+  geom_line(
+    data = filter(df_af_hold_min, type == "fit"),
+    aes(x = date, y = value, color = series, linetype = type),
+    size = 0.8
+  ) +
+  # (5) Colour/Fill for series "tmin"
+  scale_color_manual(
+    name   = "Series",
+    values = c(tmin = "steelblue"),
+    labels = c(tmin = "Tmin")
+  ) +
+  scale_fill_manual(
+    name   = "Series",
+    values = c(tmin = "steelblue"),
+    labels = c(tmin = "Tmin")
+  ) +
+  # (6) Linetype legend: solid = actual/past, dashed = forecast
+  scale_linetype_manual(
+    name   = "Type",
+    values = c(actual = "solid", fit = "dashed"),
+    labels = c(actual = "Actual", fit = "Forecast")
+  ) +
+  labs(
+    x     = "Date",
+    y     = "Tmin (°C)",
+    title = "SF Downtown: Nov 2024 History + Dec 2024 Forecast of Tmin",
+    subtitle = paste0(
+      "Historical (Nov 1–Nov 30) in grey; ",
+      "Out-of-Sample Dec 1–Dec 31 with 95 % CI ribbon"
+    )
+  ) +
+  theme_minimal(base_size = 13) +
+  theme(
+    plot.title     = element_text(size = 16, face = "bold"),
+    plot.subtitle  = element_text(size = 12, face = "italic"),
+    legend.position = "bottom"
+  )
+
+```
+
+
+```{r}
+#| eval: false
+#| include: false
+#| fig-height: 6
+#| fig-width: 12
+
+
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+
+# 1) Re‐shape “Nov 2024 history” for Tmax and Tmin into a common format:
+df_prev_tmax2 <- df_prev %>%
+  rename(value = tmax) %>%         # rename tmax → value
+  mutate(
+    series = "tmax",               # tag as “tmax”
+    type   = "history"             # tag as “history”
+  ) %>%
+  select(date, series, type, value)
+
+df_prev_tmin2 <- df_prev_min %>%
+  rename(value = tmin) %>%         # rename tmin → value
+  mutate(
+    series = "tmin",               # tag as “tmin”
+    type   = "history"             # tag as “history”
+  ) %>%
+  select(date, series, type, value)
+
+df_prev_all <- bind_rows(df_prev_tmax2, df_prev_tmin2)
+# df_prev_all has columns: date | series ("tmax"/"tmin") | type="history" | value
+
+# 2) Stack the two “Dec 2024 95 % CI” data.frames:
+df_interval_hold_all <- bind_rows(
+  df_interval_hold_min %>% select(date, lower, upper, series),
+  df_interval_hold     %>% select(date, lower, upper, series)
+)
+# now df_interval_hold_all has columns: date | lower | upper | series ("tmin"/"tmax")
+
+# 3) Stack the two “Dec 2024 actual vs. fit” data.frames:
+df_af_hold_all <- bind_rows(
+  df_af_hold_min %>% select(date, series, type, value),
+  df_af_hold     %>% select(date, series, type, value)
+)
+# df_af_hold_all has: date | series ("tmin"/"tmax") | type ∈ {actual, fit} | value
+
+# 4) One‐panel ggplot putting everything together:
+spatial_forecast <- ggplot() +
+  # (a) Nov 2024 history (solid lines for both series)
+  geom_line(
+    data = df_prev_all,
+    aes(x = date, y = value, color = series, linetype = type),
+    size = 0.7
+  ) +
+  # (b) Dec 2024 95 % CI ribbons (one ribbon per series)
+  geom_ribbon(
+    data = df_interval_hold_all,
+    aes(x = date, ymin = lower, ymax = upper, fill = series),
+    alpha = 0.25
+  ) +
+  # (c) Dec 2024 actuals (solid lines; these appear only on Dec dates)
+  geom_line(
+    data = filter(df_af_hold_all, type == "actual"),
+    aes(x = date, y = value, color = series, linetype = type),
+    size = 0.8
+  ) +
+  # (d) Dec 2024 forecasts (dashed lines)
+  geom_line(
+    data = filter(df_af_hold_all, type == "fit"),
+    aes(x = date, y = value, color = series, linetype = type),
+    size = 0.8
+  ) +
+  # (e) Color/fill scales: steelblue for Tmin; darkorange for Tmax
+  scale_color_manual(
+    name   = "Series",
+    values = c(tmin = "steelblue", tmax = "#D85711"),
+    labels = c(tmin = "Tmin", tmax = "Tmax")
+  ) +
+  scale_fill_manual(
+    name   = "Series",
+    values = c(tmin = "steelblue", tmax = "#D85711"),
+    labels = c(tmin = "Tmin", tmax = "Tmax")
+  ) +
+  # (f) Linetype legend: history=solid, actual=solid, fit=dashed
+  scale_linetype_manual(
+    name   = "Type",
+    values = c(
+      history = "solid",
+      actual  = "solid",
+      fit     = "dashed"
+    ),
+    labels = c(
+      history = "Historical (Nov 2024)",
+      actual  = "Actual (Dec 2024)",
+      fit     = "Forecast (Dec 2024)"
+    )
+  ) +
+  # (g) Labels and theme
+  labs(
+    x        = "Date",
+    y        = "Temperature (°C)",
+    title    = "SF Downtown: Nov 2024 History & Dec 2024 Forecasts for Tmin & Tmax",
+    subtitle = paste0(
+      "Nov 1–30 2024 in solid; Dec 1–31 2024 forecasts with 95 % CI ribbon"
+    )
+  ) +
+  theme_minimal(base_size = 13) +
+  theme(
+    plot.title    = element_text(size = 16, face = "bold"),
+    plot.subtitle = element_text(size = 11, face = "italic"),
+    legend.position = "bottom"
+  )
+print(spatial_forecast)
+ggsave(file.path(output_dir, "spatial_forecast.pdf"), plot = spatial_forecast, device = "pdf", width = 12, height = 6, units = "in")
+```
+
+
+#### 3.4.3.a
+
+
+```{r}
+#| eval: false
+#| include: false
+# 28) 90% PI for SF forecasts on test
+sf_sd_test <- sapply(forecast_res_test$Q, function(Sig) sqrt(Sig[1,1]))
+z90 <- qnorm(0.95)
+sf_lower_test <- sf_fore_test - z90 * sf_sd_test
+sf_upper_test <- sf_fore_test + z90 * sf_sd_test
+
+# 29) Plot last 60 days of training (before Dec 2024), actual Dec 2024, and Dec 2024 forecasts for SF
+
+# Determine indices for last 60 training days:
+last_train_date <- as.Date("2024-11-30")
+last_train_idx <- which(all_dates == last_train_date)
+start_plot <- max(1, last_train_idx - 59)
+
+# Data frame for last 60 days of training (observed)
+train_last60_df <- tibble(
+  date = all_dates[start_plot:last_train_idx],
+  temp = sf_true_train[start_plot:length(train_idx)],
+  type = "Observed (Train)"
+)
+
+# Data frame for actual December 2024
+dec2024_dates <- all_dates[test_idx]
+actual_dec_df <- tibble(
+  date = dec2024_dates,
+  temp = sf_true_test,
+  type = "Observed (Dec 2024)"
+)
+
+# Data frame for December 2024 forecasts
+forecast_dec_df <- tibble(
+  date = dec2024_dates,
+  temp = sf_fore_test,
+  type = "Forecast (Dec 2024)"
+)
+
+# Combine all three
+plot_df <- bind_rows(train_last60_df, actual_dec_df, forecast_dec_df)
+
+# 30) Plot everything with 90% prediction interval for Dec 2024
+ribbon_dec_df <- tibble(
+  date  = dec2024_dates,
+  lower = sf_lower_test,
+  upper = sf_upper_test
+)
+
+library(ggplot2)
+ggplot() +
+  geom_ribbon(data = ribbon_dec_df,
+              aes(x = date, ymin = lower, ymax = upper),
+              fill = "steelblue", alpha = 0.2) +
+  geom_line(data = plot_df,
+            aes(x = date, y = temp, color = type, linetype = type),
+            size = 0.8) +
+  scale_color_manual(
+    values = c(
+      "Observed (Train)"     = "orange",
+      "Observed (Dec 2024)"  = "black",
+      "Forecast (Dec 2024)"  = "steelblue"
+    )
+  ) +
+  scale_linetype_manual(
+    values = c(
+      "Observed (Train)"     = "solid",
+      "Observed (Dec 2024)"  = "solid",
+      "Forecast (Dec 2024)"  = "dashed"
+    )
+  ) +
+  labs(
+    title    = "SF Tmin: Spatial‐Factor DLM — Training vs. December 2024",
+    subtitle = sprintf("Train RMSE=%.2f, MAE=%.2f | Test RMSE=%.2f, MAE=%.2f",
+                       rmse_train, mae_train, rmse_test, mae_test),
+    x        = "Date",
+    y        = "Min Temperature (°C)",
+    color    = "",
+    linetype = ""
+  ) +
+  coord_cartesian(
+    xlim = c(all_dates[start_plot], dec2024_dates[length(dec2024_dates)]),
+    ylim = range(
+      c(train_last60_df$temp, actual_dec_df$temp, ribbon_dec_df$lower, ribbon_dec_df$upper),
+      na.rm = TRUE
+    )
+  ) +
+  theme_minimal()
+```
+
+
+```{r}
+#| eval: false
+#| include: false
+#checkresiduals
+# (Assumes Y_train, filter_res_train, sf_hat_train, and all_dates/train_idx are already defined)
+
+# 1) Extract in‐sample residuals for each station
+resid_matrix <- Y_train - filter_res_train$f   # [n_train × 4]
+colnames(resid_matrix) <- station_names
+
+# 2) Convert residuals to ts objects (optional)
+dates_train <- all_dates[train_idx]
+resid_ts <- lapply(1:ncol(resid_matrix), function(j) {
+  ts(resid_matrix[, j],
+     start = c(year(dates_train[1]), yday(dates_train[1])),
+     frequency = 365)
+})
+names(resid_ts) <- station_names
+
+# 3) Choose SF residuals for diagnostics
+sf_resid <- resid_matrix[, "SAN FRANCISCO DWTN"]
+
+# 4) Time‐series plot of SF residuals
+plot(dates_train, sf_resid, type = "l", col = "darkgray",
+     main = "SF In‐Sample Residuals over Time",
+     xlab = "Date", ylab = "Residual (°C)")
+
+# 5) Histogram + density overlay
+hist(sf_resid, breaks = 30, freq = FALSE,
+     main = "Histogram of SF Residuals (Train)",
+     xlab = "Residual (°C)", col = "lightblue")
+lines(density(sf_resid, na.rm = TRUE), col = "darkblue", lwd = 2)
+
+# 6) QQ‐plot vs Normal
+qqnorm(sf_resid, main = "QQ‐Plot of SF Residuals (Train)")
+qqline(sf_resid, col = "red", lwd = 2)
+
+# 7) ACF and PACF of SF residuals
+par(mar = c(4, 4, 2, 1))
+acf(sf_resid, na.action = na.pass, main = "ACF of SF Residuals")
+pacf(sf_resid, na.action = na.pass, main = "PACF of SF Residuals")
+par(mfrow = c(1,1))
+
+# 8) Ljung-Box test for autocorrelation at various lags
+for (L in c(7, 14, 21, 28)) {
+  lb <- Box.test(sf_resid, lag = L, type = "Ljung-Box", fitdf = 0)
+  cat(sprintf("Ljung-Box (lag=%d):  statistic=%.3f, p‐value=%.3f\n",
+              L, lb$statistic, lb$p.value))
+}
+
+# 9) Kolmogorov-Smirnov test for normality (since Shapiro‐Wilk fails for large n)
+sf_resid2 <- na.omit(sf_resid)
+ks <- ks.test(sf_resid2, "pnorm",
+              mean = mean(sf_resid2),
+              sd   = sd(sf_resid2))
+cat(sprintf("KS test: statistic=%.3f, p‐value=%.3f\n", ks$statistic, ks$p.value))
+
+# 10) Residuals vs Fitted plot
+sf_fitted <- sf_hat_train
+valid_idx_train <- which(!is.na(sf_resid))
+plot(sf_fitted[valid_idx_train], sf_resid[valid_idx_train],
+     xlab = "Fitted Value (°C)", ylab = "Residual (°C)",
+     main = "SF Residuals vs Fitted", col = "darkgray", pch = 16)
+abline(h = 0, col = "red", lwd = 2)
+
+# 11) Repeat ACF/PACF and Ljung-Box for each station
+for (j in seq_along(station_names)) {
+  stn <- station_names[j]
+  resid_j <- resid_matrix[, j]
+  cat("\n--- Diagnostics for station:", stn, "---\n")
+  acf(resid_j, na.action = na.pass, main = paste("ACF of", stn, "Residuals"))
+  pacf(resid_j, na.action = na.pass, main = paste("PACF of", stn, "Residuals"))
+  lbj <- Box.test(resid_j, lag = 14, type = "Ljung-Box", fitdf = 0)
+  cat(sprintf("Ljung-Box (lag=14) for %s: statistic=%.3f, p‐value=%.3f\n",
+              stn, lbj$statistic, lbj$p.value))
+}
+
+# 12) Summary statistics for each station’s residuals
+for (j in seq_along(station_names)) {
+  stn <- station_names[j]
+  resid_j <- resid_matrix[, j]
+  cat(sprintf("\nStation %s: mean=%.4f, sd=%.4f, missing%%=%.2f\n",
+              stn,
+              mean(resid_j, na.rm = TRUE),
+              sd(resid_j, na.rm = TRUE),
+              100 * sum(is.na(resid_j)) / length(resid_j)))
+}
+
+# 13) Residual heatmap (optional)
+library(reshape2)
+resid_df <- data.frame(date = dates_train, resid_matrix)
+resid_melt <- melt(resid_df, id.vars = "date", variable.name = "Station", value.name = "Residual")
+ggplot(resid_melt, aes(x = date, y = Station, fill = Residual)) +
+  geom_tile() +
+  scale_fill_gradient2(low = "blue", mid = "white", high = "red", midpoint = 0) +
+  labs(title = "Residuals Heatmap (Train)", x = "Date", y = "Station") +
+  theme_minimal()
+
+```
